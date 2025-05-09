@@ -1,0 +1,18 @@
+# Copyright (c) 2025, ENFLAME INC.  All rights reserved.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.service.name }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    app: gcushare
+    component: {{ .Values.deployName }}
+spec:
+  # type: {{ .Values.service.type }}
+  ports:
+    - protocol: TCP
+      port: {{ .Values.service.servicePort }}
+      targetPort: {{ .Values.service.targetPort }}
+  selector:
+    app: gcushare
+    component: {{ .Values.deployName }} 

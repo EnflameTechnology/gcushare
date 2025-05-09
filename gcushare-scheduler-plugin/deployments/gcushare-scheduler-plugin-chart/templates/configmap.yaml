@@ -1,0 +1,25 @@
+# Copyright (c) 2025, ENFLAME INC.  All rights reserved.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.configmap.name }}
+  namespace: {{ $.Release.Namespace }}
+data:
+  gcushare-scheduler-plugin-config.yaml: |
+    apiVersion: {{ include "schedulerConfig.apiVersion" . | trim }}
+    kind: KubeSchedulerConfiguration
+    leaderElection:
+      leaderElect: true
+      resourceName: {{ .Values.configmap.lease }}
+      resourceNamespace: {{ $.Release.Namespace }}
+    profiles:
+      - schedulerName: {{ .Values.configmap.schedulerName }}
+        plugins:
+          filter:
+            enabled:
+            - name: GCUShareSchedulerPlugin
+          bind:
+            enabled:
+            - name: GCUShareSchedulerPlugin
+            disabled:
+            - name: DefaultBinder

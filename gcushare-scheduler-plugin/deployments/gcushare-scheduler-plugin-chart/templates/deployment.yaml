@@ -1,0 +1,76 @@
+# Copyright (c) 2025, ENFLAME INC.  All rights reserved.
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  name: {{ .Values.deployName }}
+  namespace: {{ $.Release.Namespace }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: gcushare
+      component: {{ .Values.deployName }}
+  template:
+    metadata:
+      labels:
+        app: gcushare
+        component: {{ .Values.deployName }}
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: node-role.kubernetes.io/master
+                operator: Exists
+            - matchExpressions:
+              - key: node-role.kubernetes.io/control-plane
+                operator: Exists
+      tolerations:
+      - effect: NoSchedule
+        operator: Exists
+        key: node-role.kubernetes.io/master
+      - effect: NoSchedule
+        operator: Exists
+        key: node-role.kubernetes.io/control-plane
+      - effect: NoSchedule
+        operator: Exists
+        key: node.cloudprovider.kubernetes.io/uninitialized
+      serviceAccount: {{ .Values.rbac.serviceAccount.name }}
+      containers:
+        - name: {{ .Values.container.name }}
+          image: "{{ .Values.image.repository }}/{{ .Values.image.name }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - gcushare-scheduler-plugin
+            - --config=/config/gcushare-scheduler-plugin-config.yaml
+            - --v={{ .Values.container.logLevel }}
+          env:
+          - name: PORT
+            value: "{{ .Values.container.port }}"
+          volumeMounts:
+          - name: gcushare-dir
+            mountPath: /var/log/enflame/gcushare
+          - name: topscloud-config
+            mountPath: /etc/topscloud
+          - name: config
+            mountPath: /config
+          readinessProbe:
+            tcpSocket:
+              port: {{ .Values.container.port }}
+            initialDelaySeconds: 3
+            periodSeconds: 5
+      volumes:
+        - name: gcushare-dir
+          hostPath:
+            path: /var/log/enflame/gcushare
+            type: DirectoryOrCreate
+        - name: topscloud-config
+          hostPath:
+            path: /etc/topscloud
+            type: DirectoryOrCreate
+        - name: config
+          configMap:
+            name: {{ .Values.configmap.name }}
