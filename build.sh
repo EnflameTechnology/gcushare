@@ -3,9 +3,9 @@
 # Copyright 2024 Enflame. All Rights Reserved.
 #
 
-if [ -f "../../g_version.txt" ]; then
-    source ../../g_version.txt
-fi
+
+export GCUSHARE_VERSION="1.0.0"
+
 PKG_VER=${GCUSHARE_VERSION:-"0.0.0"}
 
 function usage() {

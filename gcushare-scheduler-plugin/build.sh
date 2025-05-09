@@ -5,9 +5,6 @@
 
 set -eu -o pipefail
 
-if [ -f "../../../g_version.txt" ]; then
-    source ../../../g_version.txt
-fi
 PKG_VER=${GCUSHARE_VERSION:-"0.0.0"}
 
 function usage() {
@@ -45,7 +42,7 @@ function build_all() {
     cd -
 
     mkdir -p ${PKG_DIR}/config
-    cp -rf ../../common/topscloud.json ${PKG_DIR}/config/
+    cp -rf ../config/topscloud.json ${PKG_DIR}/config/
 
     echo -e "\033[33mBuilding gcushare-scheduler-plugin package successfully!\033[0m"
 }
