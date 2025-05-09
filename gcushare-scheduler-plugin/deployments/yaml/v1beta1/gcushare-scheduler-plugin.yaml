@@ -1,0 +1,272 @@
+# Copyright (c) 2025, ENFLAME INC.  All rights reserved.
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: gcushare-scheduler-plugin
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - endpoints
+      - events
+    verbs:
+      - create
+      - get
+      - update
+  - apiGroups:
+      - ""
+    resources:
+      - namespaces
+    verbs:
+      - list
+      - watch
+  - apiGroups:
+      - ""
+    resources:
+      - nodes
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+    verbs:
+      - delete
+      - get
+      - list
+      - watch
+      - update
+      - patch
+  - apiGroups:
+      - ""
+    resources:
+      - bindings
+      - pods/binding
+    verbs:
+      - create
+  - apiGroups:
+      - ""
+    resources:
+      - pods/status
+    verbs:
+      - patch
+      - update
+  - apiGroups:
+      - ""
+    resources:
+      - replicationcontrollers
+      - services
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - apps
+      - extensions
+    resources:
+      - replicasets
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - apps
+    resources:
+      - statefulsets
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - policy
+    resources:
+      - poddisruptionbudgets
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - ""
+    resources:
+      - persistentvolumeclaims
+      - persistentvolumes
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - "storage.k8s.io"
+    resources:
+      - storageclasses
+      - csinodes
+      - csidrivers
+      - csistoragecapacities
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - "coordination.k8s.io"
+    resources:
+      - leases
+    verbs:
+      - create
+      - get
+      - list
+      - update
+  - apiGroups:
+      - "events.k8s.io"
+    resources:
+      - events
+    verbs:
+      - create
+      - patch
+      - update
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gcushare-scheduler-plugin
+  namespace: kube-system
+---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: gcushare-scheduler-plugin
+  namespace: kube-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: gcushare-scheduler-plugin
+subjects:
+- kind: ServiceAccount
+  name: gcushare-scheduler-plugin
+  namespace: kube-system
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gcushare-scheduler-plugin
+  namespace: kube-system
+data:
+  gcushare-scheduler-plugin-config.yaml: |
+    apiVersion: kubescheduler.config.k8s.io/v1beta1
+    kind: KubeSchedulerConfiguration
+    leaderElection:
+      leaderElect: true
+      resourceName: gcushare-scheduler-plugin
+      resourceNamespace: kube-system
+    profiles:
+      - schedulerName: gcushare-scheduler
+        plugins:
+          filter:
+            enabled:
+            - name: GCUShareSchedulerPlugin
+          bind:
+            enabled:
+            - name: GCUShareSchedulerPlugin
+            disabled:
+            - name: DefaultBinder
+---
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  name: gcushare-scheduler-plugin
+  namespace: kube-system
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+        app: gcushare
+        component: gcushare-scheduler-plugin
+  template:
+    metadata:
+      labels:
+        app: gcushare
+        component: gcushare-scheduler-plugin
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: node-role.kubernetes.io/master
+                operator: Exists
+            - matchExpressions:
+              - key: node-role.kubernetes.io/control-plane
+                operator: Exists
+      tolerations:
+      - effect: NoSchedule
+        operator: Exists
+        key: node-role.kubernetes.io/master
+      - effect: NoSchedule
+        operator: Exists
+        key: node-role.kubernetes.io/control-plane
+      - effect: NoSchedule
+        operator: Exists
+        key: node.cloudprovider.kubernetes.io/uninitialized
+      serviceAccount: gcushare-scheduler-plugin
+      containers:
+        - name: gcushare-scheduler-plugin
+          image: artifact.enflame.cn/enflame_docker_images/enflame/gcushare-scheduler-plugin:latest
+          imagePullPolicy: IfNotPresent
+          args:
+            - gcushare-scheduler-plugin
+            - --config=/config/gcushare-scheduler-plugin-config.yaml
+            - --v=3
+          env:
+          - name: PORT
+            value: "12345"
+          volumeMounts:
+          - name: gcushare-dir
+            mountPath: /var/log/enflame/gcushare
+          - name: topscloud-config
+            mountPath: /etc/topscloud
+          - name: config
+            mountPath: /config
+          readinessProbe:
+            tcpSocket:
+              port: 12345
+            initialDelaySeconds: 3
+            periodSeconds: 5
+      volumes:
+        - name: gcushare-dir
+          hostPath:
+            path: /var/log/enflame/gcushare
+            type: DirectoryOrCreate
+        - name: topscloud-config
+          hostPath:
+            path: /etc/topscloud
+            type: DirectoryOrCreate
+        - name: config
+          configMap:
+            name: gcushare-scheduler-plugin
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gcushare-scheduler-plugin
+  namespace: kube-system
+  labels:
+    app: gcushare
+    component: gcushare-scheduler-plugin
+spec:
+  ports:
+    - protocol: TCP
+      port: 32766
+      targetPort: 12345
+  selector:
+    app: gcushare
+    component: gcushare-scheduler-plugin

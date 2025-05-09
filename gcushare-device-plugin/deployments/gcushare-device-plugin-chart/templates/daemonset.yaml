@@ -1,0 +1,79 @@
+# Copyright 2022 Enflame. All Rights Reserved.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ .Values.deployName }}
+  namespace: {{ $.Release.Namespace }}
+spec:
+  selector:
+    matchLabels:
+        component: {{ .Values.deployName }}
+        app: gcushare
+        name: gcushare-device-plugin-ds
+  template:
+    metadata:
+      annotations:
+        scheduler.alpha.kubernetes.io/critical-pod: ""
+      labels:
+        component: {{ .Values.deployName }}
+        app: gcushare
+        name: gcushare-device-plugin-ds
+    spec:
+      serviceAccount: {{ .Values.rbac.serviceAccount.name }}
+      hostNetwork: true
+      tolerations:
+      - effect: NoSchedule
+        operator: Exists
+        key: node-role.kubernetes.io/master
+      - effect: NoSchedule
+        operator: Exists
+        key: node-role.kubernetes.io/control-plane
+      nodeSelector:
+        enflame.com/gcushare: "true"
+      containers:
+      - image: "{{ .Values.image.repository }}/{{ .Values.image.name }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        name: gcushare
+        # Make this pod as Guaranteed pod which will never be evicted because of node's resource consumption.
+        command:
+          - gcushare-device-plugin
+          - --slice-count={{ .Values.sliceCount }}
+          - --resource-isolation={{ .Values.resourceIsolation }}
+        resources:
+          limits:
+            memory: "300Mi"
+            cpu: "1"
+          requests:
+            memory: "300Mi"
+            cpu: "1"
+        env:
+        - name: KUBECONFIG
+          value: /etc/kubernetes/kubelet.conf
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        securityContext:
+          # privileged: true
+          # allowPrivilegeEscalation: false
+          # capabilities:
+          #   drop: ["ALL"]
+        volumeMounts:
+          - name: device-plugin
+            mountPath: /var/lib/kubelet/device-plugins
+          - name: gcushare-dic
+            mountPath: /var/log/enflame/gcushare
+          - name: topscloud-config
+            mountPath: /etc/topscloud
+      volumes:
+        - name: device-plugin
+          hostPath:
+            path: /var/lib/kubelet/device-plugins
+        - name: gcushare-dic
+          hostPath:
+            path: /var/log/enflame/gcushare
+            type: DirectoryOrCreate
+        - name: topscloud-config
+          hostPath:
+            path: /etc/topscloud
+            type: DirectoryOrCreate
