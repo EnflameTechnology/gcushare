@@ -1,0 +1,22 @@
+{
+	"version": "v1",
+	"registerResource": [
+		"enflame.com/gcu",
+		"enflame.com/vgcu"
+	],
+	"mainDevice": [
+		"/dev/gcu"
+	],
+	"virtualDevice": [
+		"/dev/vgcu"
+	],
+	"driverDevice": [
+		"/dev/gcuctl"
+	],
+	"utilityBins": [
+		"efsmi"
+	],
+	"utilityLibs": [
+		"libefml.so"
+	]
+}

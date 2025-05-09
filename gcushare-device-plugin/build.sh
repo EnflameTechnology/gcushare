@@ -3,9 +3,6 @@
 # Copyright 2023 Enflame. All Rights Reserved.
 #
 
-if [ -f "../../../g_version.txt" ]; then
-    source ../../../g_version.txt
-fi
 PKG_VER=${GCUSHARE_VERSION:-"0.0.0"}
 
 function usage() {
@@ -34,7 +31,7 @@ function build_all() {
     cp -rf -L deployments/* ${PKG_DIR}
 
     mkdir -p ${PKG_DIR}/config
-    cp -rf ../../common/topscloud.json ${PKG_DIR}/config/
+    cp -rf ../config/topscloud.json ${PKG_DIR}/config/
 
     echo -e "\033[33mBuilding gcushare-device-plugin package successfully!\033[0m"
 }
