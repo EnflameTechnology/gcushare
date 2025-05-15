@@ -3,8 +3,8 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
-	"math"
 	"net"
 	"os"
 	"path"
@@ -20,9 +20,11 @@ import (
 	"gcushare-device-plugin/pkg/config"
 	"gcushare-device-plugin/pkg/consts"
 	"gcushare-device-plugin/pkg/device"
+	"gcushare-device-plugin/pkg/informer"
 	"gcushare-device-plugin/pkg/kube"
 	"gcushare-device-plugin/pkg/logs"
 	"gcushare-device-plugin/pkg/resource"
+	"gcushare-device-plugin/pkg/structs"
 	"gcushare-device-plugin/pkg/utils"
 )
 
@@ -37,7 +39,7 @@ type GCUDevicePluginServe struct {
 	device            *device.Device
 	socket            string
 	healthCheck       bool
-	resourceIsolation bool
+	drsEnabled        bool
 	stop              chan struct{}
 	health            chan []*pluginapi.Device
 	queryKubelet      bool
@@ -54,9 +56,14 @@ type GCUDevicePluginServe struct {
 }
 
 // NewGCUDevicePluginServe returns an initialized EnflameDevicePlugin
-func NewGCUDevicePluginServe(healthCheck, queryKubelet bool, client *kube.KubeletClient, device *device.Device) (
-	*GCUDevicePluginServe, error) {
-	clusterResource, err := resource.NewClusterResource(device.Config)
+func NewGCUDevicePluginServe(healthCheck, queryKubelet, drsEnabled bool, client *kube.KubeletClient,
+	device *device.Device) (*GCUDevicePluginServe, error) {
+	resourceName := device.Config.ResourceName(drsEnabled)
+	socketFile := consts.ServerSock
+	if drsEnabled {
+		socketFile = strings.Split(socketFile, ".")[0] + "-drs.sock"
+	}
+	clusterResource, err := resource.NewClusterResource(device.Config, resourceName)
 	if err != nil {
 		return nil, err
 	}
@@ -65,6 +72,12 @@ func NewGCUDevicePluginServe(healthCheck, queryKubelet bool, client *kube.Kubele
 	if err := podResource.Informer.Start(context.TODO()); err != nil {
 		return nil, err
 	}
+	if drsEnabled {
+		if err := informer.NewConfigMapInformer(clusterResource.NodeName, device,
+			clusterResource.ClientSet).Start(context.TODO()); err != nil {
+			return nil, err
+		}
+	}
 	fakeDevices, deviceMap := device.GetFakeDevices()
 
 	// get devices count of node, and patch device info to node, Status.Capacity, Status.Allocatable
@@ -72,54 +85,26 @@ func NewGCUDevicePluginServe(healthCheck, queryKubelet bool, client *kube.Kubele
 	if err != nil {
 		return nil, err
 	}
-	if err := nodeResource.PatchGCUMemoryMapToNode(utils.GetDeviceCapacityMap(fakeDevices)); err != nil {
+	if err := nodeResource.PatchGCUMemoryMapToNode(utils.GetDeviceCapacityMap(fakeDevices), drsEnabled); err != nil {
 		return nil, err
-	}
-	resourceIsolation, err := nodeResource.CheckResourceIsolation(device.ResourceIsolation)
-	if err != nil {
-		return nil, err
-	}
-	if resourceIsolation {
-		logs.Info("gcushare resource isolation mode is enabled")
-		if err := validSliceCount(device); err != nil {
-			return nil, err
-		}
-	} else {
-		logs.Warn("gcushare resource isolation mode is disabled")
 	}
 	return &GCUDevicePluginServe{
-		resourceName:      device.Config.ResourceName(),
-		fakeDevices:       fakeDevices,
-		device:            device,
-		socket:            consts.ServerSock,
-		healthCheck:       healthCheck,
-		resourceIsolation: resourceIsolation,
-		stop:              make(chan struct{}),
-		health:            make(chan []*pluginapi.Device),
-		queryKubelet:      queryKubelet,
-		kubeletClient:     client,
-		config:            device.Config,
-		podResource:       podResource,
-		nodeResource:      nodeResource,
-		allLocked:         make(chan map[string]struct{}, 1),
-		sendDevices:       deviceMap,
+		resourceName:  resourceName,
+		fakeDevices:   fakeDevices,
+		device:        device,
+		socket:        socketFile,
+		drsEnabled:    drsEnabled,
+		healthCheck:   healthCheck,
+		stop:          make(chan struct{}),
+		health:        make(chan []*pluginapi.Device),
+		queryKubelet:  queryKubelet,
+		kubeletClient: client,
+		config:        device.Config,
+		podResource:   podResource,
+		nodeResource:  nodeResource,
+		allLocked:     make(chan map[string]struct{}, 1),
+		sendDevices:   deviceMap,
 	}, nil
-}
-
-func validSliceCount(device *device.Device) error {
-	for _, devInfo := range device.Info {
-		if float64(device.SliceCount) > math.Min(float64(devInfo.Memory), float64(devInfo.Sip)) {
-			err := fmt.Errorf("sliceCount: %d should not be greater than device sip: %d and memory: %d",
-				device.SliceCount, devInfo.Sip, devInfo.Memory)
-			logs.Error(err)
-			return err
-		}
-	}
-	if device.SliceCount > consts.RecommendedMaxSliceCount {
-		logs.Warn("found sliceCount: %d, but it should not be greater than %d is recommended, otherwise more device fragments may be generated",
-			device.SliceCount, consts.RecommendedMaxSliceCount)
-	}
-	return nil
 }
 
 // Stop stops the gRPC server
@@ -253,6 +238,7 @@ func (plugin *GCUDevicePluginServe) ListAndWatch(e *pluginapi.Empty, s pluginapi
 				logs.Error(err, "list watch send gcu device health list to kubelet failed")
 				return err
 			}
+			logs.Info("list watch send gcu device health list to kubelet success")
 		}
 	}
 }
@@ -325,7 +311,7 @@ func (plugin *GCUDevicePluginServe) updateDeviceCapacityMap() error {
 		return nil
 	}
 	logs.Info("list watch will update device capacity information to node annotations")
-	if err := plugin.nodeResource.PatchGCUMemoryMapToNode(deviceCapacityMap); err != nil {
+	if err := plugin.nodeResource.PatchGCUMemoryMapToNode(deviceCapacityMap, plugin.drsEnabled); err != nil {
 		return err
 	}
 	plugin.deviceCapacityMap = deviceCapacityMap
@@ -335,7 +321,15 @@ func (plugin *GCUDevicePluginServe) updateDeviceCapacityMap() error {
 // Allocate which return list of devices.
 // Allocate called by kubelet
 func (plugin *GCUDevicePluginServe) Allocate(ctx context.Context, reqs *pluginapi.AllocateRequest) (
-	*pluginapi.AllocateResponse, error) {
+	resp *pluginapi.AllocateResponse, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			errMsg := fmt.Sprintf("Internal error! Recovered from panic: %v", r)
+			logs.Error(errMsg)
+			err = fmt.Errorf("%s", errMsg)
+			resp = nil
+		}
+	}()
 	logs.Info("----Allocate shared gcu starting----")
 	if len(reqs.ContainerRequests) != 1 {
 		err := fmt.Errorf("internal error! the Allocate() method can only allocate resources for one container at a time currently")
@@ -349,21 +343,32 @@ func (plugin *GCUDevicePluginServe) Allocate(ctx context.Context, reqs *pluginap
 
 	plugin.Lock()
 	defer plugin.Unlock()
-	assumePod, err := plugin.getAssumePod(containerRequest)
+	assumePod, instanceID, err := plugin.getAssumePod(containerRequest)
 	if err != nil {
 		return nil, err
 	}
 	if assumePod == nil {
-		msg := fmt.Sprintf("invalid allocation request: unable to find pod request %s: %d", plugin.resourceName, containerRequest)
-		logs.Error(fmt.Errorf(msg), "")
-		return nil, fmt.Errorf(msg)
+		err := fmt.Errorf("invalid allocation request: unable to find pod request %s: %d", plugin.resourceName, containerRequest)
+		logs.Error(err)
+		return nil, err
 	}
 
 	assignedID, err := plugin.podResource.GetGCUIDFromPodAnnotation(assumePod)
 	if err != nil {
 		return nil, err
 	}
-	responses, err := plugin.makeContainerResponse(assignedID, containerRequest)
+	index := ""
+	if plugin.resourceName == consts.DRSResourceName {
+		assignedDrsDevice := assumePod.Annotations[consts.DRSAssignedDevice]
+		assignedDevice := &structs.DeviceSpec{}
+		if err := json.Unmarshal([]byte(assignedDrsDevice), assignedDevice); err != nil {
+			logs.Error(err, "json unmarshal failed, content: %s", assignedDrsDevice)
+			return nil, err
+		}
+		index = assignedDevice.Index
+	}
+
+	responses, err := plugin.makeContainerResponse(assignedID, index, instanceID)
 	if err != nil {
 		return nil, err
 	}
@@ -373,66 +378,49 @@ func (plugin *GCUDevicePluginServe) Allocate(ctx context.Context, reqs *pluginap
 	return responses, nil
 }
 
-func (plugin *GCUDevicePluginServe) makeContainerResponse(assignedID string, containerRequest int) (
+func (plugin *GCUDevicePluginServe) makeContainerResponse(assignedID, index, instanceID string) (
 	*pluginapi.AllocateResponse, error) {
+	envs := map[string]string{
+		consts.ENFLAME_VISIBLE_DEVICES: assignedID,
+	}
+	if index != "" {
+		envs[consts.TOPS_VISIBLE_DEVICES] = fmt.Sprintf("DRS-%s:%s", index, instanceID)
+	}
 	responses := &pluginapi.AllocateResponse{}
 	response := pluginapi.ContainerAllocateResponse{
-		Envs: map[string]string{
-			consts.ENFLAME_VISIBLE_DEVICES: assignedID,
-		},
+		Envs: envs,
 	}
-	plugin.setEnvForIsolation(response, containerRequest, assignedID)
 	responses.ContainerResponses = append(responses.ContainerResponses, &response)
 	return responses, nil
 }
 
-func (plugin *GCUDevicePluginServe) setEnvForIsolation(response pluginapi.ContainerAllocateResponse,
-	containerRequest int, assignedID string) {
-	if !plugin.resourceIsolation {
-		logs.Warn("gcushare resource isolation mode is disabled, which may cause resource conflicts")
-		return
-	}
-	if containerRequest == plugin.device.SliceCount {
-		response.Envs[consts.ENFLAME_CONTAINER_SUB_CARD] = "false"
-	} else {
-		response.Envs[consts.ENFLAME_CONTAINER_SUB_CARD] = "true"
-	}
-	response.Envs[consts.ENFLAME_CONTAINER_USABLE_PROCESSOR] = fmt.Sprintf("%d",
-		plugin.device.Info[assignedID].Sip*containerRequest/plugin.device.SliceCount)
-	response.Envs[consts.ENFLAME_CONTAINER_USABLE_SHARED_MEM] = fmt.Sprintf("%d",
-		plugin.device.Info[assignedID].L2*containerRequest/plugin.device.SliceCount)
-	response.Envs[consts.ENFLAME_CONTAINER_USABLE_GLOBAL_MEM] = fmt.Sprintf("%d",
-		plugin.device.Info[assignedID].Memory*containerRequest/plugin.device.SliceCount)
-}
-
-func (plugin *GCUDevicePluginServe) getAssumePod(containerRequest int) (*v1.Pod, error) {
+func (plugin *GCUDevicePluginServe) getAssumePod(containerRequest int) (*v1.Pod, string, error) {
 	pods, err := plugin.podResource.GetCandidatePods(plugin.queryKubelet, plugin.kubeletClient)
 	if err != nil {
 		logs.Error(err, "invalid allocation requst: Failed to find candidate pods")
-		return nil, err
+		return nil, "", err
 	}
 
 	var assumePod *v1.Pod
+	drsInstanceID := ""
 	for _, pod := range pods {
 		logs.Info("pod(name: %s, uuid: %s) request %s: %d with timestamp: %v", pod.Name, pod.UID, plugin.resourceName,
 			plugin.podResource.GetGCUMemoryFromPodResource(pod), resource.GetAssumeTimeFromPodAnnotation(pod))
 		if assumePod == nil {
-			containerName, err := plugin.podResource.PodExistContainerCanBind(containerRequest, pod)
+			ok, instanceID, err := plugin.podResource.PodExistContainerCanBind(containerRequest, pod)
 			if err != nil {
-				return nil, err
+				return nil, "", err
 			}
-			if containerName == "" {
+			if !ok {
 				continue
-			}
-			if err := plugin.podResource.CheckPodAllContainersBind(containerName, pod); err != nil {
-				return assumePod, err
 			}
 			logs.Info("candidate pod(name: %s, uuid: %s) request %s: %d with timestamp: %v is selected",
 				pod.Name, pod.UID, plugin.resourceName, containerRequest, resource.GetAssumeTimeFromPodAnnotation(pod))
 			assumePod = pod
+			drsInstanceID = instanceID
 		}
 	}
-	return assumePod, nil
+	return assumePod, drsInstanceID, nil
 }
 
 func (plugin *GCUDevicePluginServe) GetDevicePluginOptions(context.Context, *pluginapi.Empty) (*pluginapi.DevicePluginOptions, error) {

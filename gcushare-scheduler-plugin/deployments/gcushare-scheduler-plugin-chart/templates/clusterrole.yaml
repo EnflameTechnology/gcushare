@@ -101,6 +101,10 @@ rules:
     resources:
       - configmaps
     verbs:
+      - create
+      - update
+      - patch
+      - delete
       - get
       - list
       - watch

@@ -50,7 +50,7 @@ func WatchConfig() {
 	logs.Info("Starting watch config file: %s", configPath)
 	watcher, err := NewFSWatcher(config.TopscloudPath)
 	if err != nil {
-		logs.Error(err, "Failed to created FS watcher: %v.")
+		logs.Error(err, "Failed to created FS watcher for path: %s", config.TopscloudPath)
 		os.Exit(1)
 	}
 	defer watcher.Close()

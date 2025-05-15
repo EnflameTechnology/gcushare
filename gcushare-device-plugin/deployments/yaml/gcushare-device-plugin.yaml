@@ -9,12 +9,14 @@ rules:
   resources:
   - nodes
   - nodes/proxy
+  - configmaps
   verbs:
   - update
   - patch
   - get
   - list
   - watch
+  - delete
 - apiGroups:
   - ""
   resources:
@@ -99,7 +101,6 @@ spec:
         command:
           - gcushare-device-plugin
           - --slice-count=6
-          - --resource-isolation=true
         resources:
           limits:
             memory: "300Mi"

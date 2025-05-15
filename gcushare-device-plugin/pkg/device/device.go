@@ -3,7 +3,6 @@ package device
 
 import (
 	"fmt"
-	"strconv"
 
 	pluginapi "k8s.io/kubernetes/pkg/kubelet/apis/deviceplugin/v1beta1"
 
@@ -13,28 +12,21 @@ import (
 )
 
 type Device struct {
-	Config            *config.Config
-	Count             int
-	SliceCount        int
-	ResourceIsolation bool
-	Info              map[string]DeviceInfo
+	Config     *config.Config
+	Count      int
+	SliceCount int
+	Info       map[string]DeviceInfo
 }
 
 type DeviceInfo struct {
-	BusID  string
-	Path   string
-	Sip    int
-	L2     int
-	Memory int
+	BusID string
+	Path  string
 }
 
-func NewDevice(sliceCount int, config *config.Config, resourceIsolation bool) (*Device, error) {
-	logs.Info("each device will be shared into %d with SliceCount=%d", sliceCount, sliceCount)
+func NewDevice(config *config.Config) (*Device, error) {
 	device := &Device{
-		Config:            config,
-		SliceCount:        sliceCount,
-		ResourceIsolation: resourceIsolation,
-		Info:              map[string]DeviceInfo{},
+		Config: config,
+		Info:   map[string]DeviceInfo{},
 	}
 	if err := device.buildDeviceInfo(); err != nil {
 		return nil, err
@@ -75,24 +67,13 @@ func (rer *Device) buildDeviceInfo() error {
 	}
 	logs.Info("found %s device count: %d from efsmi", devType, len(gcuDevicesInfo))
 	for _, gcuDevice := range gcuDevicesInfo {
-		L3Memory, err := strconv.Atoi(gcuDevice.L3Memory)
-		if err != nil {
-			logs.Error(err, "device(minor: %s, index: %s) L3 memory must be int type, found: %s", gcuDevice.Minor,
-				gcuDevice.Index, gcuDevice.L3Memory)
-			return err
-		}
-		L3Memory /= 1024
 		devPath := fmt.Sprintf("%s/%s%s", consts.DEVICE_PATH_PREFIX, devType, gcuDevice.Minor)
-		sipNum, L2Memory := 24, 64 // Hardcoded for now, since it cannot be queried from efsmi
 		rer.Info[gcuDevice.Minor] = DeviceInfo{
-			Path:   devPath,
-			BusID:  gcuDevice.PCIBusID,
-			Sip:    sipNum,
-			L2:     L2Memory,
-			Memory: L3Memory,
+			Path:  devPath,
+			BusID: gcuDevice.PCIBusID,
 		}
-		logs.Info("found device %s%s(minor: %s, path: %s, type: %s, memory: %dGB, sip: %d, L2: %dMB)", devType,
-			gcuDevice.Minor, gcuDevice.Minor, devPath, gcuDevice.Model, L3Memory, sipNum, L2Memory)
+		logs.Info("found device %s%s(minor: %s, path: %s, product: %s, busid: %s)", devType, gcuDevice.Minor,
+			gcuDevice.Minor, devPath, gcuDevice.Product, gcuDevice.PCIBusID)
 	}
 	rer.Count = len(rer.Info)
 	return nil

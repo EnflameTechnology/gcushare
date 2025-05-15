@@ -8,15 +8,17 @@ import (
 )
 
 type BaseResource struct {
-	ResourceName string
-	Config       *config.Config
-	Clientset    *kubernetes.Clientset
+	SharedResourceName string
+	DRSResourceName    string
+	Config             *config.Config
+	Clientset          *kubernetes.Clientset
 }
 
 func NewBaseResource(config *config.Config, clientset *kubernetes.Clientset) *BaseResource {
 	return &BaseResource{
-		ResourceName: config.ResourceName(),
-		Config:       config,
-		Clientset:    clientset,
+		SharedResourceName: config.ResourceName(false),
+		DRSResourceName:    config.ResourceName(true),
+		Config:             config,
+		Clientset:          clientset,
 	}
 }

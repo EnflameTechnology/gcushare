@@ -9,6 +9,7 @@ import (
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/strategicpatch"
 
 	"gcushare-device-plugin/pkg/consts"
@@ -94,28 +95,7 @@ func preparePatchBytesforNodeStatus(nodeName string, oldNode *v1.Node, newNode *
 	return patchBytes, nil
 }
 
-func (rer *NodeResource) CheckResourceIsolation(resourceIsolation bool) (bool, error) {
-	node, err := rer.GetNode()
-	if err != nil {
-		logs.Error(err, "get node: %s failed", rer.NodeName)
-		return false, err
-	}
-	value, ok := node.Labels[consts.ResourceIsolationLabel]
-	if !ok {
-		return resourceIsolation, nil
-	}
-	logs.Info("find label: %s=%s exist on node: %s", consts.ResourceIsolationLabel, value, rer.NodeName)
-	if value == "true" {
-		return true, nil
-	} else if value == "false" {
-		return false, nil
-	}
-	err = fmt.Errorf("the value of node label: %s must be bool type, but is: %v", consts.ResourceIsolationLabel, value)
-	logs.Error(err)
-	return false, err
-}
-
-func (rer *NodeResource) PatchGCUMemoryMapToNode(deviceCapacityMap map[string]int) error {
+func (rer *NodeResource) PatchGCUMemoryMapToNode(deviceCapacityMap map[string]int, drsEnabled bool) error {
 	content, err := json.Marshal(deviceCapacityMap)
 	if err != nil {
 		logs.Error(err, "json marshal device memory map: %v failed", deviceCapacityMap)
@@ -126,25 +106,33 @@ func (rer *NodeResource) PatchGCUMemoryMapToNode(deviceCapacityMap map[string]in
 		logs.Error(err, "get node: %s from cluster failed", rer.NodeName)
 		return err
 	}
-	node.Annotations[rer.Config.ReplaceResource(consts.GCUSharedCapacity)] = string(content)
-	// patchCount := node.Annotations[rer.Config.ReplaceDomain(consts.PatchCount)]
-	// if patchCount == "" {
-	// 	logs.Info("init device memory map patch count: 0")
-	// 	patchCount = "0"
-	// }
-	// count, err := strconv.Atoi(patchCount)
-	// if err != nil {
-	// 	logs.Error(err, "patch count: %s must be int type", patchCount)
-	// 	return err
-	// }
-	// count = count + 1
-	// node.Annotations[rer.Config.ReplaceDomain(consts.PatchCount)] = fmt.Sprintf("%d", count)
-	_, err = rer.ClientSet.CoreV1().Nodes().Update(context.TODO(), node, metav1.UpdateOptions{})
+	annotationKey := rer.Config.ReplaceResource(consts.GCUSharedCapacity)
+	if drsEnabled {
+		annotationKey = rer.Config.ReplaceResource(consts.GCUDRSCapacity)
+	}
+	patch := map[string]interface{}{
+		"metadata": map[string]interface{}{
+			"annotations": map[string]string{
+				annotationKey: string(content),
+			},
+		},
+	}
+	patchBytes, err := json.Marshal(patch)
 	if err != nil {
-		logs.Error(err, "patch node: %s annotations to cluster failed, content: %v", rer.NodeName, node.Annotations)
+		logs.Error(err, "json marshal failed, content: %v", patch)
 		return err
 	}
-	logs.Info("patch node: %s annotations success, content: %v", rer.NodeName, node.Annotations)
+	if _, err := rer.ClientSet.CoreV1().Nodes().Patch(
+		context.TODO(),
+		node.Name,
+		types.MergePatchType,
+		patchBytes,
+		metav1.PatchOptions{},
+	); err != nil {
+		logs.Error(err, "patch node: %s annotations to cluster failed, content: %s", rer.NodeName, string(patchBytes))
+		return err
+	}
+	logs.Info("patch node: %s annotations success, content: %s", rer.NodeName, string(patchBytes))
 	return nil
 }
 

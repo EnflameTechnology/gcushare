@@ -19,7 +19,7 @@ type ClusterResource struct {
 	ResourceName string
 }
 
-func NewClusterResource(config *config.Config) (*ClusterResource, error) {
+func NewClusterResource(config *config.Config, resourceName string) (*ClusterResource, error) {
 	clientSet, err := kube.GetKubeClient()
 	if err != nil {
 		return nil, err
@@ -34,6 +34,6 @@ func NewClusterResource(config *config.Config) (*ClusterResource, error) {
 		ClientSet:    clientSet,
 		NodeName:     nodeName,
 		Config:       config,
-		ResourceName: config.ResourceName(),
+		ResourceName: resourceName,
 	}, nil
 }

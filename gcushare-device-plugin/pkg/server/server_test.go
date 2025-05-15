@@ -136,7 +136,6 @@ func TestNewGCUDevicePluginServe(t *testing.T) {
 
 		node2 := node1.DeepCopy()
 		node2.Annotations[consts.GCUSharedCapacity] = `{"0": 4, "1": 4}`
-		node2.Labels[consts.ResourceIsolationLabel] = "true"
 		outputs := []OutputCell{
 			{Values: Params{node, nil}},
 			{Values: Params{node1, nil}},

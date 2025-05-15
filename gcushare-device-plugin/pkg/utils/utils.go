@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+	"time"
 
 	pluginapi "k8s.io/kubernetes/pkg/kubelet/apis/deviceplugin/v1beta1"
 
@@ -46,6 +47,15 @@ func ConvertToString(value interface{}) string {
 	return string(byteVal)
 }
 
+func JsonMarshalIndent(value interface{}) string {
+	byteVal, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		logs.Error(err, "marshal value:%v to string failed", value)
+		return fmt.Sprintf("%v", value)
+	}
+	return string(byteVal)
+}
+
 func FileIsExist(file string) bool {
 	_, err := os.Stat(file)
 	return err == nil || os.IsExist(err)
@@ -61,19 +71,22 @@ func GetDeviceCapacityMap(devices []*pluginapi.Device) map[string]int {
 }
 
 func ExecCommand(name string, args ...string) (string, error) {
-	// catch standard output of error
-	var stdoutBuf, stderrBuf bytes.Buffer
-	cmd := exec.Command(name, args...)
-	cmd.Stdout = &stdoutBuf
-	cmd.Stderr = &stderrBuf
-	if err := cmd.Run(); err != nil {
-		logs.Error(err, "execute command: '%s %s' failed, detail: %s", name, strings.Join(args, " "), stderrBuf.String())
-		return "", fmt.Errorf("%s", stderrBuf.String())
+	maxRetryTimes := 5
+	for i := 0; i < maxRetryTimes; i++ {
+		var stdoutBuf, stderrBuf bytes.Buffer
+		cmd := exec.Command(name, args...)
+		cmd.Stdout = &stdoutBuf
+		cmd.Stderr = &stderrBuf
+		if err := cmd.Run(); err != nil {
+			logs.Error(err, "execute command: '%s %s' failed, retry times: %d, detail: %s", name,
+				strings.Join(args, " "), i, stderrBuf.String())
+			time.Sleep(1 * time.Second)
+			continue
+		}
+		return stdoutBuf.String(), nil
 	}
-	// if stdoutBuf.String() != "" {
-	// 	logs.Info("execute command: '%s %s' success, output: \n%s", name, strings.Join(args, " "), stdoutBuf.String())
-	// } else {
-	// 	logs.Info("execute command: '%s %s' success", name, strings.Join(args, " "))
-	// }
-	return stdoutBuf.String(), nil
+	err := fmt.Errorf("execute command: '%s %s' failed with max retry times: %d",
+		name, strings.Join(args, " "), maxRetryTimes)
+	logs.Error(err)
+	return "", err
 }

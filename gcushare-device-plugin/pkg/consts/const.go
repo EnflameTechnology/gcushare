@@ -10,18 +10,21 @@ type DeviceState uint32
 
 const (
 	/* for log */
-	LOGPATH  = "/var/log/enflame/gcushare/gcushare-device-plugin.log"
-	LOGINFO  = "INFO"
-	LOGERROR = "ERROR"
-	LOGWARN  = "WARNING"
+	LOGPATH    = "/var/log/enflame/gcushare/gcushare-device-plugin.log"
+	LOGINFO    = "INFO"
+	LOGERROR   = "ERROR"
+	LOGWARN    = "WARNING"
+	LOGDEBUG   = "DEBUG"
+	TimeFormat = "2006-01-02 15:04:05"
 
 	/* for component info*/
 	COMPONENT_NAME = "gcushare-device-plugin"
 
 	/* for resource */
-	ResourceName = "enflame.com/shared-gcu"
-	CountName    = "enflame.com/gcu-count"
-	ServerSock   = pluginapi.DevicePluginPath + "enflamegcushare.sock"
+	DRSResourceName    = "enflame.com/drs-gcu"
+	SharedResourceName = "enflame.com/shared-gcu"
+	CountName          = "enflame.com/gcu-count"
+	ServerSock         = pluginapi.DevicePluginPath + "enflamegcushare.sock"
 
 	// for device health check
 	PCIDevicePath                      = "/sys/bus/pci/devices"
@@ -39,6 +42,7 @@ const (
 
 	// response env
 	ENFLAME_VISIBLE_DEVICES             = "ENFLAME_VISIBLE_DEVICES"
+	TOPS_VISIBLE_DEVICES                = "TOPS_VISIBLE_DEVICES"
 	ENFLAME_CONTAINER_SUB_CARD          = "ENFLAME_CONTAINER_SUB_CARD"
 	ENFLAME_CONTAINER_USABLE_PROCESSOR  = "ENFLAME_CONTAINER_USABLE_PROCESSOR"
 	ENFLAME_CONTAINER_USABLE_SHARED_MEM = "ENFLAME_CONTAINER_USABLE_SHARED_MEM"
@@ -50,12 +54,28 @@ const (
 	PodHasAssignedGCU     = "enflame.com/gcu-assigned"
 	PodAssignedGCUTime    = "enflame.com/gcu-assigned-time"
 	GCUSharedCapacity     = "enflame.com/gcu-shared-capacity"
+	GCUDRSCapacity        = "enflame.com/gcu-drs-capacity"
 	PodAssignedContainers = "assigned-containers"
 	PatchCount            = GCUSharedCapacity + "-patch-count"
+	DRSAssignedDevice     = "drs-assigned-device"
 
 	// other
-	RecommendedMaxSliceCount     = 6
 	RecommendedKubeConfigPathEnv = "KUBECONFIG"
-	ResourceIsolationLabel       = "enflame.com/gcushare-resource-isolation"
 	MaxRetryTimes                = 30
+
+	// drs
+	DRSSchedulerName  = "gcushare-scheduler-drs"
+	ProfileNameRegExp = `\b\d+g\.\d+gb\b`
+	SliceCountDRS     = 6
+	Plugin            = "plugin"
+	DRSPlugin         = "drsPlugin"
+
+	// drs configmap
+	ConfigMapNode      = "node-name"
+	ConfigMapOwner     = "owner"
+	SchedulerRecord    = "schedulerRecord"
+	StateSuccess       = "Success"
+	StateError         = "Error"
+	StateUnschedulable = "Unschedulable"
+	StateSkip          = "Skip"
 )

@@ -9,12 +9,14 @@ rules:
   resources:
   - nodes
   - nodes/proxy
+  - configmaps
   verbs:
   - update
   - patch
   - get
   - list
   - watch
+  - delete
 - apiGroups:
   - ""
   resources:

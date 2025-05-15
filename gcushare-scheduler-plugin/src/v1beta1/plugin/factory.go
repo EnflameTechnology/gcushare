@@ -26,13 +26,14 @@ func NewGCUShareSchedulerPlugin(config *config.Config, clientset *kubernetes.Cli
 		// }
 		baseResource := resources.NewBaseResource(config, clientset)
 		return &GCUShareSchedulerPlugin{
-			mu:           new(sync.Mutex),
-			resourceName: config.ResourceName(),
-			clientset:    clientset,
-			config:       config,
-			filterCache:  make(map[k8sTypes.UID]filterResult),
-			podResource:  resources.NewPodResource(baseResource),
-			nodeResource: resources.NewNodeResource(baseResource),
+			mu:                 new(sync.Mutex),
+			sharedResourceName: config.ResourceName(false),
+			drsResourceName:    config.ResourceName(true),
+			clientset:          clientset,
+			config:             config,
+			filterCache:        make(map[k8sTypes.UID]filterResult),
+			podResource:        resources.NewPodResource(baseResource),
+			nodeResource:       resources.NewNodeResource(baseResource),
 		}, nil
 	}, nil
-}     
+}
