@@ -28,7 +28,7 @@ func GetDeviceInfoFromSmiAndPci() ([]DeviceFullInfo, error) {
 		}
 		devices = append(devices, DeviceFullInfo{
 			SmiDeviceInfo: smiInfo,
-			PciDeviceInfo:   *pciInfo,
+			PciDeviceInfo: *pciInfo,
 		})
 	}
 	jsonData, err := json.MarshalIndent(devices, "", "  ")

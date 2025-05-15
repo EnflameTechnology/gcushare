@@ -18,10 +18,11 @@ import (
 func Listen(config *config.Config, clientset *kubernetes.Clientset, version string) {
 	baseResource := resources.NewBaseResource(config, clientset)
 	inspect := &Inspect{
-		resourceName: config.ResourceName(),
-		clientset:    clientset,
-		podResource:  resources.NewPodResource(baseResource),
-		nodeResource: resources.NewNodeResource(baseResource),
+		sharedResourceName: config.ResourceName(false),
+		drsResourceName:    config.ResourceName(true),
+		clientset:          clientset,
+		podResource:        resources.NewPodResource(baseResource),
+		nodeResource:       resources.NewNodeResource(baseResource),
 	}
 	router := httprouter.New()
 	router.GET(consts.PluginVersionRoute, pluginVersion(version).GetVersion)

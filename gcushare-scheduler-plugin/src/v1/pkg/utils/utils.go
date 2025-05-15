@@ -23,6 +23,15 @@ func ConvertToString(value interface{}) string {
 	return string(byteVal)
 }
 
+func JsonMarshalIndent(value interface{}) string {
+	byteVal, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		logs.Error(err, "marshal value:%v to string failed", value)
+		return fmt.Sprintf("%v", value)
+	}
+	return string(byteVal)
+}
+
 func RemovePodManagedFields(pod *v1.Pod) *v1.Pod {
 	pod.ManagedFields = []metav1.ManagedFieldsEntry{}
 	return pod

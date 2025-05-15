@@ -5,7 +5,6 @@
 # Declare variables to be passed into your templates.
 
 sliceCount: 6
-resourceIsolation: true
 
 image:
   repository: artifact.enflame.cn/enflame_docker_images/enflame

@@ -18,14 +18,16 @@ import (
 
 	"gcushare-device-plugin/pkg/consts"
 	"gcushare-device-plugin/pkg/device"
+	"gcushare-device-plugin/pkg/informer"
 	"gcushare-device-plugin/pkg/kube"
 	"gcushare-device-plugin/pkg/logs"
+	"gcushare-device-plugin/pkg/structs"
 	"gcushare-device-plugin/pkg/utils"
 )
 
 type PodResource struct {
 	ClusterResource
-	Informer *PodInformer
+	Informer *informer.PodInformer
 }
 
 var podAssignedGCUTime string
@@ -34,7 +36,8 @@ func NewPodResource(clusterResource *ClusterResource) *PodResource {
 	podAssignedGCUTime = clusterResource.Config.ReplaceResource(consts.PodAssignedGCUTime)
 	return &PodResource{
 		ClusterResource: *clusterResource,
-		Informer:        NewPodInformer(clusterResource.NodeName, clusterResource.Config, clusterResource.ClientSet),
+		Informer: informer.NewPodInformer(clusterResource.NodeName, clusterResource.ResourceName,
+			clusterResource.Config, clusterResource.ClientSet),
 	}
 }
 
@@ -170,9 +173,9 @@ func getPendingPodList(kubeletClient *kube.KubeletClient) (*v1.PodList, error) {
 	}
 
 	if len(resultPodList.Items) == 0 {
-		msg := "not found pending pod when execute allocate gcu device"
-		logs.Error(fmt.Errorf(msg), "")
-		return nil, fmt.Errorf(msg)
+		err := fmt.Errorf("not found pending pod when execute allocate gcu device")
+		logs.Error(err)
+		return nil, err
 	}
 	return resultPodList, nil
 }
@@ -182,85 +185,77 @@ func (rer *PodResource) GetGCUMemoryFromPodResource(pod *v1.Pod) uint {
 	var total uint
 	containers := pod.Spec.Containers
 	for _, container := range containers {
-		if val, ok := container.Resources.Limits[v1.ResourceName(rer.Config.ResourceName())]; ok {
+		if val, ok := container.Resources.Limits[v1.ResourceName(rer.ClusterResource.ResourceName)]; ok {
 			total += uint(val.Value())
 		}
 	}
 	return total
 }
 
-func (rer *PodResource) PodExistContainerCanBind(containerReq int, pod *v1.Pod) (string, error) {
-	assignedMap := map[string]string{}
+func (rer *PodResource) PodExistContainerCanBind(containerReq int, pod *v1.Pod) (bool, string, error) {
+	assignedMap := map[string]structs.AllocateRecord{}
 	assignedContainers, ok := pod.Annotations[consts.PodAssignedContainers]
 	if ok {
 		if err := json.Unmarshal([]byte(assignedContainers), &assignedMap); err != nil {
 			logs.Error(err, "unmarshal assigned containers to map of pod(name: %s, uuid: %s) failed, detail: %s",
 				pod.Name, pod.UID, assignedContainers)
-			return "", err
+			return false, "", err
 		}
 	}
+	selectedContainerName := ""
+	requestResourceCount := 0
+	kubeletAllocatedCount := 0
 	for _, container := range pod.Spec.Containers {
-		if val, ok := container.Resources.Limits[v1.ResourceName(rer.Config.ResourceName())]; ok {
-			if assigned, ok := assignedMap[container.Name]; ok && assigned == "true" {
+		if val, ok := container.Resources.Limits[v1.ResourceName(rer.ClusterResource.ResourceName)]; ok {
+			requestResourceCount += 1
+			if assigned, ok := assignedMap[container.Name]; ok && assigned.KubeletAllocated != nil && *assigned.KubeletAllocated {
+				kubeletAllocatedCount += 1
 				continue
 			}
 			if int(val.Value()) == containerReq {
-				logs.Info("container: %s of pod(name: %s, uuid: %s) can allocated shared gcu: %d", container.Name,
-					pod.Name, pod.UID, containerReq)
-				return container.Name, nil
+				if selectedContainerName == "" {
+					logs.Info("container: %s of pod(name: %s, uuid: %s) will allocate shared gcu: %d", container.Name,
+						pod.Name, pod.UID, containerReq)
+					selectedContainerName = container.Name
+				} else {
+					logs.Info("container: %s of pod(name: %s, uuid: %s) request %s: %d, but has not assign up to now",
+						container.Name, pod.Name, pod.UID, rer.ResourceName, containerReq)
+				}
 			}
 		}
 	}
-	logs.Warn("pod(name: %s, uuid: %s) no container can allocated shared gcu: %d, skip this pod",
-		pod.Name, pod.UID, containerReq)
-	return "", nil
-}
-
-func (rer *PodResource) CheckPodAllContainersBind(containerName string, pod *v1.Pod) error {
-	assignedMap := map[string]string{}
-	assignedContainers, ok := pod.Annotations[consts.PodAssignedContainers]
-	if !ok {
-		assignedMap[containerName] = "true"
-	} else {
-		if err := json.Unmarshal([]byte(assignedContainers), &assignedMap); err != nil {
-			logs.Error(err, "unmarshal assigned containers to map of pod(name: %s, uuid: %s) failed, detail: %s",
-				pod.Name, pod.UID, assignedContainers)
-			return err
-		}
-		assignedMap[containerName] = "true"
+	if selectedContainerName == "" {
+		logs.Warn("pod(name: %s, uuid: %s) no container can allocated shared gcu: %d, skip this pod",
+			pod.Name, pod.UID, containerReq)
+		return false, "", nil
 	}
+
+	alloc, ok := assignedMap[selectedContainerName]
+	if !ok {
+		alloc = structs.AllocateRecord{}
+	}
+	boolTrue := true
+	alloc.KubeletAllocated = &boolTrue
+	assignedMap[selectedContainerName] = alloc
+
 	values, err := json.Marshal(assignedMap)
 	if err != nil {
 		logs.Error(err, "marshal assigned containers to string of pod(name: %s, uuid: %s) failed, detail: %v",
 			pod.Name, pod.UID, assignedMap)
-		return err
+		return false, "", err
 	}
-
 	allContainersAssigned := pod.Annotations[rer.Config.ReplaceResource(consts.PodHasAssignedGCU)]
-	if rer.podAllContainersBind(assignedMap, pod) {
+	if requestResourceCount-kubeletAllocatedCount == 1 {
+		logs.Info("check all containers of pod(name: %s, uuid: %s) assigned %s success", pod.Name, pod.UID, rer.ResourceName)
 		allContainersAssigned = "true"
 	}
 	if err := rer.patchPodAnnotationsAssignedContainers(string(values), allContainersAssigned, pod); err != nil {
-		return err
+		return false, "", err
 	}
-	return nil
-}
-
-func (rer *PodResource) podAllContainersBind(assignedMap map[string]string, pod *v1.Pod) bool {
-	for _, container := range pod.Spec.Containers {
-		if _, ok := container.Resources.Limits[v1.ResourceName(rer.Config.ResourceName())]; !ok {
-			continue
-		}
-		gcuMem := container.Resources.Limits[v1.ResourceName(rer.Config.ResourceName())]
-		if assigned, ok := assignedMap[container.Name]; !ok || assigned != "true" {
-			logs.Info("container: %s of pod(name: %s, uuid: %s) request %s: %d, but has not assign up to now",
-				container.Name, pod.Name, pod.UID, rer.ResourceName, gcuMem.Value())
-			return false
-		}
+	if alloc.InstanceID == nil {
+		return true, "", nil
 	}
-	logs.Info("check all containers of pod(name: %s, uuid: %s) assigned %s success", pod.Name, pod.UID,
-		rer.ResourceName)
-	return true
+	return true, *alloc.InstanceID, nil
 }
 
 func (rer *PodResource) patchPodAnnotationsAssignedContainers(values, allContainersAssigned string, pod *v1.Pod) error {
@@ -332,35 +327,6 @@ func (rer *PodResource) GetGCUIDFromPodAnnotation(pod *v1.Pod) (string, error) {
 		return "", err
 	}
 	return value, nil
-}
-
-func (rer *PodResource) UpdatePodSpec(assumePod *v1.Pod) error {
-	patchedAnnotationBytes, err := rer.patchPodAnnotationSpecAssigned()
-	if err != nil {
-		return err
-	}
-	_, err = rer.ClientSet.CoreV1().Pods(assumePod.Namespace).Patch(context.TODO(), assumePod.Name,
-		types.StrategicMergePatchType, patchedAnnotationBytes, metav1.PatchOptions{})
-	if err != nil {
-		logs.Error(err, "patch pod(name: %s, uuid: %s) annotations to cluster failed %s",
-			assumePod.Name, assumePod.UID, string(patchedAnnotationBytes))
-		return err
-	}
-	return nil
-}
-
-func (rer *PodResource) patchPodAnnotationSpecAssigned() ([]byte, error) {
-	patchAnnotations := map[string]interface{}{
-		"metadata": map[string]map[string]string{"annotations": {
-			rer.Config.ReplaceResource(consts.PodHasAssignedGCU):  "true",
-			rer.Config.ReplaceResource(consts.PodAssignedGCUTime): fmt.Sprintf("%d", time.Now().UnixNano()),
-		}}}
-	annotations, err := json.Marshal(patchAnnotations)
-	if err != nil {
-		logs.Error(err, "marshal patch annotations failed")
-		return nil, err
-	}
-	return annotations, nil
 }
 
 func (rer *PodResource) GetDisabledCardInfo(deviceInfo map[string]device.DeviceInfo) (map[string]int, error) {

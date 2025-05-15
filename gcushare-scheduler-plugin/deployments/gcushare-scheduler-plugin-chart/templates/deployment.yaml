@@ -50,6 +50,8 @@ spec:
           env:
           - name: PORT
             value: "{{ .Values.container.port }}"
+          - name: LOG_DEBUG
+            value: "true"
           volumeMounts:
           - name: gcushare-dir
             mountPath: /var/log/enflame/gcushare

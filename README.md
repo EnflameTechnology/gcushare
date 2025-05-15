@@ -1,5 +1,9 @@
 ## gcushare
-This repository contains Prometheus GCU-Exporter, which exposes Enflame GCU metrics.
+
+This repository contains gcushare, which allow you to:
+
+- Expose Enflame GCU Memory and GCU count on the node of your cluster;
+- Run Enflame GCU sharing enabled containers in your Kubernetes cluster.
 
 ### Building from Source
 

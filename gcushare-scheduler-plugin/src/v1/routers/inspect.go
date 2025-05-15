@@ -15,13 +15,15 @@ import (
 	"gcushare-scheduler-plugin/pkg/consts"
 	"gcushare-scheduler-plugin/pkg/logs"
 	"gcushare-scheduler-plugin/pkg/resources"
+	"gcushare-scheduler-plugin/pkg/structs"
 )
 
 type Inspect struct {
-	resourceName string
-	clientset    *kubernetes.Clientset
-	podResource  *resources.PodResource
-	nodeResource *resources.NodeResource
+	sharedResourceName string
+	drsResourceName    string
+	clientset          *kubernetes.Clientset
+	podResource        *resources.PodResource
+	nodeResource       *resources.NodeResource
 }
 
 type NodeInfo struct {
@@ -35,16 +37,18 @@ type NodeInfo struct {
 }
 
 type Device struct {
-	TotalGCU     int    `json:"totalGCU,omitempty"`
-	UsedGCU      *int   `json:"usedGCU,omitempty"`
-	AvailableGCU *int   `json:"availableGCU,omitempty"`
-	Pods         []*Pod `json:"pods"`
+	Virt         *string `json:"virt,omitempty"`
+	TotalGCU     int     `json:"totalGCU,omitempty"`
+	UsedGCU      *int    `json:"usedGCU,omitempty"`
+	AvailableGCU *int    `json:"availableGCU,omitempty"`
+	Pods         []*Pod  `json:"pods"`
 }
 
 type Pod struct {
 	metav1.ObjectMeta `json:",inline"`
-	UsedGCU           int         `json:"usedGCU"`
-	Phase             v1.PodPhase `json:"phase"`
+	UsedGCU           int                               `json:"usedGCU"`
+	Phase             v1.PodPhase                       `json:"phase"`
+	Containers        map[string]structs.AllocateRecord `json:"containers,omitempty"`
 }
 
 func (ins *Inspect) InspectRoute(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
@@ -54,7 +58,11 @@ func (ins *Inspect) InspectRoute(w http.ResponseWriter, r *http.Request, ps http
 	} else {
 		logs.Info("listen access url: %s, method: %s, request body:%v", consts.InspectNodeDetailRoute, "GET", r)
 	}
-	result := ins.inspect(nodeName)
+	drs := false
+	if r.URL.Query().Get("drs") == "true" {
+		drs = true
+	}
+	result := ins.inspect(nodeName, drs)
 
 	if resultBody, err := json.MarshalIndent(result, "", "  "); err != nil {
 		logs.Error(err, "marshal inspect result:%v failed", result)
@@ -70,7 +78,7 @@ func (ins *Inspect) InspectRoute(w http.ResponseWriter, r *http.Request, ps http
 	}
 }
 
-func (ins *Inspect) inspect(nodeName string) (result interface{}) {
+func (ins *Inspect) inspect(nodeName string, drs bool) (result interface{}) {
 	defer func() {
 		if r := recover(); r != nil {
 			errMsg := fmt.Sprintf("Internal error! Recovered from panic: %v", r)
@@ -84,12 +92,12 @@ func (ins *Inspect) inspect(nodeName string) (result interface{}) {
 			logs.Error(err, "get node: %s from cluster failed", nodeName)
 			return NodeInfo{Name: nodeName, Error: err.Error()}
 		}
-		if !ins.nodeResource.IsGCUSharingNode(nodeDetail) {
+		if !ins.nodeResource.IsGCUSharingNode(drs, nodeDetail) {
 			err := fmt.Errorf("node: %s is not the gcushare node", nodeName)
 			logs.Error(err)
 			return NodeInfo{Name: nodeName, Error: err.Error()}
 		}
-		return ins.buildNodeInfo(nodeDetail)
+		return ins.buildNodeInfo(nodeDetail, drs)
 	}
 	nodeList, err := ins.clientset.CoreV1().Nodes().List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
@@ -98,10 +106,10 @@ func (ins *Inspect) inspect(nodeName string) (result interface{}) {
 	}
 	res := []NodeInfo{}
 	for _, node := range nodeList.Items {
-		if !ins.nodeResource.IsGCUSharingNode(&node) {
+		if !ins.nodeResource.IsGCUSharingNode(drs, &node) {
 			continue
 		}
-		res = append(res, ins.buildNodeInfo(&node))
+		res = append(res, ins.buildNodeInfo(&node, drs))
 	}
 	if len(res) == 0 {
 		msg := "the gcushare nodes not found"
@@ -111,7 +119,7 @@ func (ins *Inspect) inspect(nodeName string) (result interface{}) {
 	return res
 }
 
-func (ins *Inspect) buildNodeInfo(node *v1.Node) NodeInfo {
+func (ins *Inspect) buildNodeInfo(node *v1.Node, drs bool) NodeInfo {
 	pods, err := ins.clientset.CoreV1().Pods("").List(context.TODO(), metav1.ListOptions{
 		FieldSelector: "spec.nodeName=" + node.Name,
 	})
@@ -120,7 +128,7 @@ func (ins *Inspect) buildNodeInfo(node *v1.Node) NodeInfo {
 		return NodeInfo{Name: node.Name, Error: err.Error()}
 	}
 	nodeUsedGCU := 0
-	devices, nodeTotalGCU, err := ins.initDevices(node)
+	devices, nodeTotalGCU, err := ins.initDevices(drs, node)
 	if err != nil {
 		return NodeInfo{Name: node.Name, Error: err.Error()}
 	}
@@ -131,42 +139,82 @@ func (ins *Inspect) buildNodeInfo(node *v1.Node) NodeInfo {
 		UsedGCU:      new(int),
 		AvailableGCU: new(int),
 	}
+	ignoreDevice := map[string]struct{}{}
 	for _, pod := range pods.Items {
-		podRequest := ins.podResource.GetGCUMemoryFromPodResource(&pod)
-		if podRequest <= 0 {
+		gcusharePod := ins.podResource.IsGCUsharingPod(&pod)
+		drsPod := ins.podResource.IsDrsGCUsharingPod(&pod)
+		if !gcusharePod && !drsPod {
 			continue
 		}
-		value := ins.podResource.GetPodAssignedDeviceID(&pod)
-		if value == "" {
-			logs.Warn("pod(name: %s, uuid: %s) request %s: %d, but has not been assigned device",
-				pod.Name, pod.UID, ins.resourceName, podRequest)
+		minor := ins.podResource.GetPodAssignedDeviceID(&pod)
+		if minor == "" {
+			logs.Warn("found pod(name: %s, uuid: %s), but has not been assigned device", pod.Name, pod.UID)
 			continue
 		}
-		if _, ok := devices[value]; !ok {
+		_, ok1 := ignoreDevice[minor]
+		if _, ok2 := devices[minor]; !ok1 && !ok2 {
 			msg := fmt.Sprintf("pod(name: %s, uuid: %s) has been assigned device id: %s, but device is not found",
-				pod.Name, pod.UID, value)
+				pod.Name, pod.UID, minor)
 			logs.Warn(msg)
 			warnMsg = append(warnMsg, msg)
 			continue
 		}
+		var podRequest int
+		var virt string
+		if drs {
+			if gcusharePod {
+				logs.Warn("device: %s is using by gcushare pod(name: %s, uuid: %s)", minor, pod.Name, pod.UID)
+				if device, ok := devices[minor]; ok {
+					nodeInfo.TotalGCU -= device.TotalGCU
+					delete(devices, minor)
+					ignoreDevice[minor] = struct{}{}
+				}
+				continue
+			}
+			podRequest = ins.podResource.GetRequestDrsPodResource(&pod)
+			virt = consts.VirtDRS
+		} else {
+			if drsPod {
+				logs.Warn("device: %s is using by drs pod(name: %s, uuid: %s)", minor, pod.Name, pod.UID)
+				if device, ok := devices[minor]; ok {
+					nodeInfo.TotalGCU -= device.TotalGCU
+					delete(devices, minor)
+					ignoreDevice[minor] = struct{}{}
+				}
+				continue
+			}
+			podRequest = ins.podResource.GetRequestFromPodResource(&pod)
+			virt = consts.VirtShared
+		}
+		if devices[minor].Virt == nil {
+			devices[minor].Virt = &virt
+		}
 		nodeUsedGCU += podRequest
-		*devices[value].UsedGCU += podRequest
-		*devices[value].AvailableGCU -= podRequest
-		if *devices[value].AvailableGCU < 0 {
+		*devices[minor].UsedGCU += podRequest
+		*devices[minor].AvailableGCU -= podRequest
+		if *devices[minor].AvailableGCU < 0 {
 			err := fmt.Errorf("device: %s on node: %s total size: %d, but at least used: %d, gcushare slice count may be modified, which is not allowed",
-				value, node.Name, devices[value].TotalGCU, *devices[value].UsedGCU)
+				minor, node.Name, devices[minor].TotalGCU, *devices[minor].UsedGCU)
 			logs.Error(err)
 			return NodeInfo{Name: node.Name, Error: err.Error()}
 		}
-		devices[value].Pods = append(devices[value].Pods, &Pod{
+		assignedMap := map[string]structs.AllocateRecord{}
+		assignedContainers := pod.Annotations[consts.PodAssignedContainers]
+		if err := json.Unmarshal([]byte(assignedContainers), &assignedMap); err != nil {
+			logs.Error(err, "unmarshal assigned containers to map of pod(name: %s, uuid: %s) failed, detail: %s",
+				pod.Name, pod.UID, assignedContainers)
+			return NodeInfo{Name: node.Name, Error: err.Error()}
+		}
+		devices[minor].Pods = append(devices[minor].Pods, &Pod{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:              pod.Name,
 				Namespace:         pod.Namespace,
 				UID:               pod.UID,
 				CreationTimestamp: pod.CreationTimestamp,
 			},
-			UsedGCU: podRequest,
-			Phase:   pod.Status.Phase,
+			UsedGCU:    podRequest,
+			Phase:      pod.Status.Phase,
+			Containers: assignedMap,
 		})
 	}
 	nodeInfo.UsedGCU = &nodeUsedGCU
@@ -176,8 +224,8 @@ func (ins *Inspect) buildNodeInfo(node *v1.Node) NodeInfo {
 	return nodeInfo
 }
 
-func (ins *Inspect) initDevices(node *v1.Node) (map[string]*Device, int, error) {
-	deviceMap, err := ins.nodeResource.GetGCUDeviceMemoryMap(node)
+func (ins *Inspect) initDevices(drs bool, node *v1.Node) (map[string]*Device, int, error) {
+	deviceMap, err := ins.nodeResource.GetGCUDeviceMemoryMap(drs, node)
 	if err != nil {
 		return nil, -1, err
 	}

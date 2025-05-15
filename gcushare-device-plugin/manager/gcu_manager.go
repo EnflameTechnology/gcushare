@@ -22,31 +22,29 @@ import (
 )
 
 type ShareGCUManager struct {
-	deviceType        string
-	resourceIsolation bool
-	healthCheck       bool
-	queryKubelet      bool
-	sliceCount        int
-	kubeletClient     *kube.KubeletClient
-	config            *config.Config
+	deviceType    string
+	healthCheck   bool
+	queryKubelet  bool
+	sliceCount    int
+	kubeletClient *kube.KubeletClient
+	config        *config.Config
 }
 
-func NewShareGCUManager(resourceIsolation, healthCheck, queryKubelet bool, sliceCount int, client *kube.KubeletClient,
+func NewShareGCUManager(healthCheck, queryKubelet bool, sliceCount int, client *kube.KubeletClient,
 	config *config.Config) *ShareGCUManager {
 	return &ShareGCUManager{
-		deviceType:        config.DeviceType(),
-		resourceIsolation: resourceIsolation,
-		healthCheck:       healthCheck,
-		queryKubelet:      queryKubelet,
-		sliceCount:        sliceCount,
-		kubeletClient:     client,
-		config:            config,
+		deviceType:    config.DeviceType(),
+		healthCheck:   healthCheck,
+		queryKubelet:  queryKubelet,
+		sliceCount:    sliceCount,
+		kubeletClient: client,
+		config:        config,
 	}
 }
 
 func (manager *ShareGCUManager) Run() error {
 	logs.Info("Fetching %s devices", manager.deviceType)
-	devices, err := device.NewDevice(manager.sliceCount, manager.config, manager.resourceIsolation)
+	devices, err := device.NewDevice(manager.config)
 	if err != nil {
 		return err
 	}
@@ -64,23 +62,15 @@ func (manager *ShareGCUManager) Run() error {
 	sigs := watcher.NewOSWatcher(syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
 
 	restart := true
-	var devicePlugin *server.GCUDevicePluginServe
+	devicePlugins := map[string]*server.GCUDevicePluginServe{}
 
 Loop:
 	for {
 		if restart {
-			if devicePlugin != nil {
-				devicePlugin.Stop()
-			}
-			logs.Info("start new gcushare device plugin")
-			devicePlugin, err = server.NewGCUDevicePluginServe(manager.healthCheck, manager.queryKubelet,
-				manager.kubeletClient, devices)
-			if err != nil {
-				logs.Error(err, "Failed to get gcushare device plugin")
+			if err := restartPlugins(devices, devicePlugins, manager, false); err != nil {
 				return err
 			}
-			if err = devicePlugin.Serve(); err != nil {
-				logs.Error(err, "Failed to start gcushare device plugin serve")
+			if err := restartPlugins(devices, devicePlugins, manager, true); err != nil {
 				return err
 			}
 			restart = false
@@ -115,10 +105,40 @@ Loop:
 				utils.Coredump("/etc/kubernetes/go_" + timestamp + ".txt")
 			default:
 				logs.Info("Received signal %v, shutting down", signal)
-				devicePlugin.Stop()
+				for _, devicePlugin := range devicePlugins {
+					devicePlugin.Stop()
+				}
 				break Loop
 			}
 		}
 	}
+	return nil
+}
+
+func restartPlugins(devices *device.Device, devicePlugins map[string]*server.GCUDevicePluginServe,
+	manager *ShareGCUManager, drsEnabled bool) error {
+	pluginName := consts.Plugin
+	sliceCount := manager.sliceCount
+	if drsEnabled {
+		sliceCount = consts.SliceCountDRS
+		pluginName = consts.DRSPlugin
+	}
+	logs.Info("each device will be shared into %d with SliceCount=%d", sliceCount, sliceCount)
+	devices.SliceCount = sliceCount
+	if devicePlugins[pluginName] != nil {
+		devicePlugins[pluginName].Stop()
+	}
+	logs.Info("start new gcushare device plugin")
+	devicePlugin, err := server.NewGCUDevicePluginServe(manager.healthCheck, manager.queryKubelet, drsEnabled,
+		manager.kubeletClient, devices)
+	if err != nil {
+		logs.Error(err, "Failed to get gcushare device plugin")
+		return err
+	}
+	if err = devicePlugin.Serve(); err != nil {
+		logs.Error(err, "Failed to start gcushare device plugin serve")
+		return err
+	}
+	devicePlugins[pluginName] = devicePlugin
 	return nil
 }

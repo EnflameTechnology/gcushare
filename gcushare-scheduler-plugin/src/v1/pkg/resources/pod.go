@@ -14,6 +14,7 @@ import (
 
 	"gcushare-scheduler-plugin/pkg/consts"
 	"gcushare-scheduler-plugin/pkg/logs"
+	"gcushare-scheduler-plugin/pkg/structs"
 )
 
 type PodResource BaseResource
@@ -23,14 +24,29 @@ func NewPodResource(baseResource *BaseResource) *PodResource {
 }
 
 func (res *PodResource) IsGCUsharingPod(pod *v1.Pod) bool {
-	return res.GetGCUMemoryFromPodResource(pod) > 0
+	return res.GetRequestFromPodResource(pod) > 0
 }
 
 // GetGCUMemoryFromPodResource gets GCU Memory of the Pod
-func (res *PodResource) GetGCUMemoryFromPodResource(pod *v1.Pod) int {
+func (res *PodResource) GetRequestFromPodResource(pod *v1.Pod) int {
 	total := 0
 	for _, container := range pod.Spec.Containers {
-		if val, ok := container.Resources.Limits[v1.ResourceName(res.ResourceName)]; ok {
+		if val, ok := container.Resources.Limits[v1.ResourceName(res.SharedResourceName)]; ok {
+			total += int(val.Value())
+		}
+	}
+	return total
+}
+
+func (res *PodResource) IsDrsGCUsharingPod(pod *v1.Pod) bool {
+	return res.GetRequestDrsPodResource(pod) > 0
+}
+
+// GetGCUMemoryFromPodResource gets GCU Memory of the Pod
+func (res *PodResource) GetRequestDrsPodResource(pod *v1.Pod) int {
+	total := 0
+	for _, container := range pod.Spec.Containers {
+		if val, ok := container.Resources.Limits[v1.ResourceName(res.DRSResourceName)]; ok {
 			total += int(val.Value())
 		}
 	}
@@ -43,7 +59,7 @@ func (res *PodResource) GetUsedGCUs(podInfoList []*framework.PodInfo) (map[strin
 		if !res.IsGCUsharingPod(podInfo.Pod) {
 			continue
 		}
-		podDeleted, assignedID := res.getPodAssignedDeviceIDWithRetry(podInfo)
+		podDeleted, assignedID := res.GetPodAssignedDeviceIDWithRetry(podInfo)
 		if podDeleted {
 			continue
 		}
@@ -73,7 +89,7 @@ func (res *PodResource) GetUsedGCUs(podInfoList []*framework.PodInfo) (map[strin
 	return nodeUsedMemory, nil
 }
 
-func (res *PodResource) getPodAssignedDeviceIDWithRetry(podInfo *framework.PodInfo) (bool, string) {
+func (res *PodResource) GetPodAssignedDeviceIDWithRetry(podInfo *framework.PodInfo) (bool, string) {
 	for retryTime := 0; retryTime < consts.MaxRetryTimes; retryTime++ {
 		if assignedID := res.GetPodAssignedDeviceID(podInfo.Pod); assignedID != "" {
 			return false, assignedID
@@ -107,4 +123,17 @@ func (res *PodResource) GetPodAssignedDeviceID(pod *v1.Pod) string {
 		return ""
 	}
 	return value
+}
+
+func (res *PodResource) InitPodAssignedContainers(pod *v1.Pod) map[string]structs.AllocateRecord {
+	result := make(map[string]structs.AllocateRecord, len(pod.Spec.Containers))
+	for _, container := range pod.Spec.Containers {
+		if val, ok := container.Resources.Limits[v1.ResourceName(res.DRSResourceName)]; ok && val.Value() > 0 {
+			alloc := structs.AllocateRecord{}
+			value := int(val.Value())
+			alloc.Request = &value
+			result[container.Name] = alloc
+		}
+	}
+	return result
 }

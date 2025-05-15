@@ -38,7 +38,6 @@ spec:
         command:
           - gcushare-device-plugin
           - --slice-count={{ .Values.sliceCount }}
-          - --resource-isolation={{ .Values.resourceIsolation }}
         resources:
           limits:
             memory: "300Mi"
@@ -53,6 +52,8 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: spec.nodeName
+        - name: LOG_DEBUG
+          value: "true"
         securityContext:
           # privileged: true
           # allowPrivilegeEscalation: false

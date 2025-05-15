@@ -18,6 +18,9 @@ data:
           filter:
             enabled:
             - name: GCUShareSchedulerPlugin
+          preBind:
+            enabled:
+            - name: GCUShareSchedulerPlugin
           bind:
             enabled:
             - name: GCUShareSchedulerPlugin

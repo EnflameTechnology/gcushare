@@ -44,7 +44,10 @@ func (conf *Config) DeviceType() string {
 }
 
 // example: enflame.com/shared-gcu
-func (conf *Config) ResourceName() string {
+func (conf *Config) ResourceName(drsEnabled bool) string {
+	if drsEnabled {
+		return conf.Domain() + "/drs-" + conf.DeviceType()
+	}
 	return conf.Domain() + "/shared-" + conf.DeviceType()
 }
 
@@ -102,7 +105,7 @@ func GetConfig() (*Config, error) {
 	}
 	// if registerResource in config file is invalid, replace it by default value
 	if len(config.RegisterResource) == 0 {
-		defaultResource := []string{strings.ReplaceAll(consts.ResourceName, "shared-", "")}
+		defaultResource := []string{strings.ReplaceAll(consts.SharedResourceName, "shared-", "")}
 		logs.Warn("registerResource: %v in config file is invalid, replace it by: %v",
 			config.RegisterResource, defaultResource)
 		config.RegisterResource = defaultResource

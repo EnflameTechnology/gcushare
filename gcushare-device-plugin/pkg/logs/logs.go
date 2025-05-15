@@ -4,16 +4,18 @@ package logs
 
 import (
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
 	"strings"
+	"sync"
+	"time"
 
 	"gcushare-device-plugin/pkg/consts"
 )
 
+var logMu sync.Mutex
 var LOGPATH = consts.LOGPATH
 
 func init() {
@@ -23,41 +25,45 @@ func init() {
 	}
 	// for run binary alone in the host
 	if err := os.MkdirAll(filepath.Dir(LOGPATH), 0755); err != nil {
-		panic(fmt.Sprintf("Error creating directory:%s", err.Error()))
+		panic(fmt.Sprintf("Error creating directory %s: %v", filepath.Dir(LOGPATH), err))
 	}
 }
 
 func Info(format string, a ...interface{}) {
+	logMu.Lock()
+	defer logMu.Unlock()
+
 	file, err := os.OpenFile(LOGPATH, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
 	if err != nil {
-		panic(fmt.Sprintf("Faild to open info logger file:%s", err.Error()))
+		panic(fmt.Sprintf("Failed to open log file: %s", err.Error()))
 	}
-	defer func() {
-		file.Close()
-	}()
-	log.SetFlags(log.Ldate | log.Ltime)
-	log.SetOutput(file)
+	defer file.Close()
+
 	_, callerFileName, callerFileline, ok := runtime.Caller(1)
 	if !ok {
-		panic("Faild to get caller")
+		panic("Failed to get caller")
 	}
 	msg := fmt.Sprintf(format, a...)
-	log.Printf("%s %s:%d %s", consts.LOGINFO, relativePath(callerFileName), callerFileline, msg)
+	logLine := fmt.Sprintf("%s %s %s:%d %s\n", time.Now().Format(consts.TimeFormat), consts.LOGINFO,
+		relativePath(callerFileName), callerFileline, msg)
+	if _, err := file.WriteString(logLine); err != nil {
+		panic(fmt.Sprintf("Failed to write log: %s", err))
+	}
 }
 
 func Error(errOut interface{}, msg ...interface{}) {
+	logMu.Lock()
+	defer logMu.Unlock()
+
 	file, err := os.OpenFile(LOGPATH, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
 	if err != nil {
-		panic(fmt.Sprintf("Faild to open info logger file:%s", err.Error()))
+		panic(fmt.Sprintf("Failed to open log file: %s", err.Error()))
 	}
-	defer func() {
-		file.Close()
-	}()
-	log.SetFlags(log.Ldate | log.Ltime)
-	log.SetOutput(file)
+	defer file.Close()
+
 	_, callerFileName, callerFileline, ok := runtime.Caller(1)
 	if !ok {
-		panic("Faild to get caller")
+		panic("Failed to get caller")
 	}
 	desc := ""
 	switch realErr := errOut.(type) {
@@ -77,26 +83,58 @@ func Error(errOut interface{}, msg ...interface{}) {
 	if desc != "" {
 		desc += ", "
 	}
-	log.Printf("%s %s:%d %serror: %v\n%s", consts.LOGERROR, relativePath(callerFileName), callerFileline,
-		desc, errOut, string(debug.Stack()))
+	logLine := fmt.Sprintf("%s %s %s:%d %serror: %v\n%s", time.Now().Format(consts.TimeFormat), consts.LOGERROR,
+		relativePath(callerFileName), callerFileline, desc, errOut, string(debug.Stack()))
+	if _, err := file.WriteString(logLine); err != nil {
+		panic(fmt.Sprintf("Failed to write log: %s", err))
+	}
 }
 
 func Warn(format string, a ...interface{}) {
+	logMu.Lock()
+	defer logMu.Unlock()
+
 	file, err := os.OpenFile(LOGPATH, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
 	if err != nil {
-		panic(fmt.Sprintf("Faild to open info logger file:%s", err.Error()))
+		panic(fmt.Sprintf("Failed to open log file: %s", err.Error()))
 	}
-	defer func() {
-		file.Close()
-	}()
-	log.SetFlags(log.Ldate | log.Ltime)
-	log.SetOutput(file)
+	defer file.Close()
+
 	_, callerFileName, callerFileline, ok := runtime.Caller(1)
 	if !ok {
-		panic("Faild to get caller")
+		panic("Failed to get caller")
 	}
 	msg := fmt.Sprintf(format, a...)
-	log.Printf("%s %s:%d %s", consts.LOGWARN, relativePath(callerFileName), callerFileline, msg)
+	logLine := fmt.Sprintf("%s %s %s:%d %s\n", time.Now().Format(consts.TimeFormat), consts.LOGWARN,
+		relativePath(callerFileName), callerFileline, msg)
+	if _, err := file.WriteString(logLine); err != nil {
+		panic(fmt.Sprintf("Failed to write log: %s", err))
+	}
+}
+
+func Debug(format string, a ...interface{}) {
+	logMu.Lock()
+	defer logMu.Unlock()
+
+	if os.Getenv("LOG_DEBUG") != "true" {
+		return
+	}
+	file, err := os.OpenFile(LOGPATH, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	if err != nil {
+		panic(fmt.Sprintf("Failed to open log file: %s", err.Error()))
+	}
+	defer file.Close()
+
+	_, callerFileName, callerFileline, ok := runtime.Caller(1)
+	if !ok {
+		panic("Failed to get caller")
+	}
+	msg := fmt.Sprintf(format, a...)
+	logLine := fmt.Sprintf("%s %s %s:%d %s\n", time.Now().Format(consts.TimeFormat), consts.LOGDEBUG,
+		relativePath(callerFileName), callerFileline, msg)
+	if _, err := file.WriteString(logLine); err != nil {
+		panic(fmt.Sprintf("Failed to write log: %s", err))
+	}
 }
 
 func relativePath(absolutePath string) string {

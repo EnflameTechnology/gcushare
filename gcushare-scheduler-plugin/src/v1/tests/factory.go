@@ -16,7 +16,7 @@ func NewPod(podName, podUID, deviceID, request string, limits ...int) *v1.Pod {
 		containers = append(containers, v1.Container{
 			Resources: v1.ResourceRequirements{
 				Limits: v1.ResourceList{
-					consts.ResourceName: *resource.NewQuantity(int64(limit), ""),
+					consts.SharedResourceName: *resource.NewQuantity(int64(limit), ""),
 				},
 			},
 		})
@@ -50,7 +50,7 @@ func NewNode(nodeName string, isGCUShareNode bool, deviceMemeryMap string, alloc
 	if deviceMemeryMap != "" {
 		node.SetAnnotations(map[string]string{consts.GCUSharedCapacity: deviceMemeryMap})
 	}
-	node.Status.Allocatable = v1.ResourceList{consts.ResourceName: *resource.NewQuantity(int64(allocatable), "")}
+	node.Status.Allocatable = v1.ResourceList{consts.SharedResourceName: *resource.NewQuantity(int64(allocatable), "")}
 	return node
 }
 

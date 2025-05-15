@@ -19,7 +19,6 @@ import (
 var Version string
 
 var (
-	resourceIsolation = flag.Bool("resource-isolation", true, "Enable or disable resource isolation")
 	healthCheck       = flag.Bool("health-check", false, "Enable or disable Health check")
 	sliceCount        = flag.Int("slice-count", 6, "Set slice count of GCU device")
 	queryFromKubelet  = flag.Bool("query-kubelet", false, "Query pending pods from kubelet instead of kube-apiserver")
@@ -48,7 +47,7 @@ func main() {
 		logs.Error(err, "get topscloud config failed")
 		os.Exit(1)
 	}
-	gcuManager := manager.NewShareGCUManager(*resourceIsolation, *healthCheck, *queryFromKubelet, *sliceCount,
+	gcuManager := manager.NewShareGCUManager(*healthCheck, *queryFromKubelet, *sliceCount,
 		kubeletClient, config)
 	if err = gcuManager.Run(); err != nil {
 		logs.Error(err, "run gcushare device plugin failed, will restart")
