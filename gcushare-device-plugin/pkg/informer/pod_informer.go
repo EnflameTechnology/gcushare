@@ -6,12 +6,10 @@ import (
 	"fmt"
 	"path/filepath"
 	"reflect"
-	"strings"
 	"sync"
 	"time"
 
 	v1 "k8s.io/api/core/v1"
-	k8serr "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/informers"
@@ -20,6 +18,7 @@ import (
 
 	"gcushare-device-plugin/pkg/config"
 	"gcushare-device-plugin/pkg/consts"
+	"gcushare-device-plugin/pkg/device"
 	"gcushare-device-plugin/pkg/logs"
 	"gcushare-device-plugin/pkg/smi"
 	"gcushare-device-plugin/pkg/structs"
@@ -33,15 +32,18 @@ type PodInformer struct {
 	GCUSharedPods map[types.UID]*v1.Pod
 	NodeName      string
 	Clientset     *kubernetes.Clientset
+	DeviceInfo    map[string]device.DeviceInfo
 }
 
-func NewPodInformer(nodeName, resourceName string, config *config.Config, clientset *kubernetes.Clientset) *PodInformer {
+func NewPodInformer(nodeName, resourceName string, config *config.Config, clientset *kubernetes.Clientset,
+	deviceInfo map[string]device.DeviceInfo) *PodInformer {
 	return &PodInformer{
 		ResourceName:  resourceName,
 		Config:        config,
 		GCUSharedPods: make(map[types.UID]*v1.Pod),
 		NodeName:      nodeName,
 		Clientset:     clientset,
+		DeviceInfo:    deviceInfo,
 	}
 }
 
@@ -133,31 +135,13 @@ func (rer *PodInformer) removePod(pod *v1.Pod) {
 	}
 }
 func (rer *PodInformer) clearResource(pod *v1.Pod) {
-	configmapName := fmt.Sprintf("%s.%s.%s.%s.configmap", pod.Name, pod.Namespace,
-		strings.Split(string(pod.UID), "-")[0], pod.Spec.NodeName)
-	if err := rer.Clientset.CoreV1().ConfigMaps(pod.Namespace).Delete(context.TODO(), configmapName,
-		metav1.DeleteOptions{}); err != nil {
-		if !k8serr.IsNotFound(err) {
-			logs.Error(err, "clear configmap: %s for pod(name: %s, uuid: %s) failed", configmapName,
-				pod.Name, pod.UID)
-		}
-	} else {
-		logs.Info("clear configmap: %s for pod(name: %s, uuid: %s) success", configmapName, pod.Name, pod.UID)
-	}
-
-	assignedDRSDevice := pod.Annotations[consts.DRSAssignedDevice]
-	assignedDevice := &structs.DeviceSpec{}
-	if err := json.Unmarshal([]byte(assignedDRSDevice), assignedDevice); err != nil {
-		logs.Error(err, "json unmarshal failed, content: %s", assignedDRSDevice)
-		return
-	}
-	pciBusID := assignedDevice.PCIBusID
+	pciBusID := rer.DeviceInfo[pod.Annotations[consts.PodAssignedGCUMinor]].BusID
 	if !utils.FileIsExist(filepath.Join(consts.PCIDevicePath, pciBusID)) {
 		logs.Warn("device pciBusID: %s not exist, need not clear drs instance", pciBusID)
 		return
 	}
 
-	index := assignedDevice.Index
+	index := pod.Annotations[consts.PodAssignedGCUIndex]
 	assignedContainers := pod.Annotations[consts.PodAssignedContainers]
 	assignedMap := map[string]structs.AllocateRecord{}
 	if err := json.Unmarshal([]byte(assignedContainers), &assignedMap); err != nil {

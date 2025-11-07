@@ -15,7 +15,7 @@ const (
 	LOGERROR   = "ERROR"
 	LOGWARN    = "WARNING"
 	LOGDEBUG   = "DEBUG"
-	TimeFormat = "2006-01-02 15:04:05"
+	TimeFormat = "2006-01-02 15:04:05.00"
 
 	/* for component info*/
 	COMPONENT_NAME = "gcushare-device-plugin"
@@ -50,7 +50,8 @@ const (
 
 	// annotations
 	PodRequestGCUSize     = "enflame.com/gcu-request-size"
-	PodAssignedGCUID      = "enflame.com/gcu-assigned-id"
+	PodAssignedGCUMinor   = "enflame.com/gcu-assigned-minor"
+	PodAssignedGCUIndex   = "enflame.com/gcu-assigned-index"
 	PodHasAssignedGCU     = "enflame.com/gcu-assigned"
 	PodAssignedGCUTime    = "enflame.com/gcu-assigned-time"
 	GCUSharedCapacity     = "enflame.com/gcu-shared-capacity"
@@ -66,6 +67,7 @@ const (
 	// drs
 	DRSSchedulerName  = "gcushare-scheduler-drs"
 	ProfileNameRegExp = `\b\d+g\.\d+gb\b`
+	BusIDRegExp       = `[0-9a-fA-F]{2}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7]`
 	SliceCountDRS     = 6
 	Plugin            = "plugin"
 	DRSPlugin         = "drsPlugin"

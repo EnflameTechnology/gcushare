@@ -18,6 +18,7 @@ import (
 
 	"gcushare-device-plugin/pkg/consts"
 	"gcushare-device-plugin/pkg/device"
+	"gcushare-device-plugin/pkg/drs"
 	"gcushare-device-plugin/pkg/informer"
 	"gcushare-device-plugin/pkg/kube"
 	"gcushare-device-plugin/pkg/logs"
@@ -32,12 +33,12 @@ type PodResource struct {
 
 var podAssignedGCUTime string
 
-func NewPodResource(clusterResource *ClusterResource) *PodResource {
+func NewPodResource(clusterResource *ClusterResource, deviceInfo map[string]device.DeviceInfo) *PodResource {
 	podAssignedGCUTime = clusterResource.Config.ReplaceResource(consts.PodAssignedGCUTime)
 	return &PodResource{
 		ClusterResource: *clusterResource,
 		Informer: informer.NewPodInformer(clusterResource.NodeName, clusterResource.ResourceName,
-			clusterResource.Config, clusterResource.ClientSet),
+			clusterResource.Config, clusterResource.ClientSet, deviceInfo),
 	}
 }
 
@@ -236,18 +237,26 @@ func (rer *PodResource) PodExistContainerCanBind(containerReq int, pod *v1.Pod) 
 	}
 	boolTrue := true
 	alloc.KubeletAllocated = &boolTrue
-	assignedMap[selectedContainerName] = alloc
+	allContainersAssigned := pod.Annotations[rer.Config.ReplaceResource(consts.PodHasAssignedGCU)]
+	if requestResourceCount-kubeletAllocatedCount == 1 {
+		logs.Info("check all containers of pod(name: %s, uuid: %s) assigned %s success", pod.Name, pod.UID, rer.ResourceName)
+		allContainersAssigned = "true"
+	}
+	if alloc.ProfileName != nil && alloc.ProfileID != nil {
+		instanceID, drsUUID, err := drs.CreateDRSInstance(pod.Annotations[consts.PodAssignedGCUIndex], *alloc.ProfileName, *alloc.ProfileID)
+		if err != nil {
+			return false, "", err
+		}
+		alloc.InstanceID = &instanceID
+		alloc.InstanceUUID = &drsUUID
+	}
 
+	assignedMap[selectedContainerName] = alloc
 	values, err := json.Marshal(assignedMap)
 	if err != nil {
 		logs.Error(err, "marshal assigned containers to string of pod(name: %s, uuid: %s) failed, detail: %v",
 			pod.Name, pod.UID, assignedMap)
 		return false, "", err
-	}
-	allContainersAssigned := pod.Annotations[rer.Config.ReplaceResource(consts.PodHasAssignedGCU)]
-	if requestResourceCount-kubeletAllocatedCount == 1 {
-		logs.Info("check all containers of pod(name: %s, uuid: %s) assigned %s success", pod.Name, pod.UID, rer.ResourceName)
-		allContainersAssigned = "true"
 	}
 	if err := rer.patchPodAnnotationsAssignedContainers(string(values), allContainersAssigned, pod); err != nil {
 		return false, "", err
@@ -255,7 +264,7 @@ func (rer *PodResource) PodExistContainerCanBind(containerReq int, pod *v1.Pod) 
 	if alloc.InstanceID == nil {
 		return true, "", nil
 	}
-	return true, *alloc.InstanceID, nil
+	return true, *alloc.InstanceUUID, nil
 }
 
 func (rer *PodResource) patchPodAnnotationsAssignedContainers(values, allContainersAssigned string, pod *v1.Pod) error {
@@ -320,7 +329,7 @@ func GetAssumeTimeFromPodAnnotation(pod *v1.Pod) (assumeTime uint64) {
 }
 
 func (rer *PodResource) GetGCUIDFromPodAnnotation(pod *v1.Pod) (string, error) {
-	value, ok := pod.ObjectMeta.Annotations[rer.Config.ReplaceResource(consts.PodAssignedGCUID)]
+	value, ok := pod.ObjectMeta.Annotations[rer.Config.ReplaceResource(consts.PodAssignedGCUMinor)]
 	if !ok || value == "" {
 		err := fmt.Errorf("pod(name: %s, uuid: %s) has not been assigned device", pod.Name, pod.UID)
 		logs.Error(err)
@@ -332,7 +341,7 @@ func (rer *PodResource) GetGCUIDFromPodAnnotation(pod *v1.Pod) (string, error) {
 func (rer *PodResource) GetDisabledCardInfo(deviceInfo map[string]device.DeviceInfo) (map[string]int, error) {
 	disabledCardInfo := map[string]int{}
 	for _, pod := range rer.Informer.GCUSharedPods {
-		assignedID, ok := pod.Annotations[rer.Config.ReplaceResource(consts.PodAssignedGCUID)]
+		assignedID, ok := pod.Annotations[rer.Config.ReplaceResource(consts.PodAssignedGCUMinor)]
 		if !ok {
 			continue
 		}

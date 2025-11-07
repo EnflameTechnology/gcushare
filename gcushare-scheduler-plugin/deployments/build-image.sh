@@ -9,7 +9,8 @@ else
     echo "build-image.conf is not found, exit."; exit 0
 fi
 
-VERSION=""
+VERSION="v1"
+SET_VERSION=false
 
 function usage() {
   cat <<EOF
@@ -65,11 +66,6 @@ function checkCommand() {
     fi
 
     case "$VERSION" in
-        "")
-            echo -e "\033[31mError: The parameter: '--version' is required.\033[0m"
-            usage
-            exit 1
-            ;;
         "v1" | "v1beta1")
             echo -e "\033[33mBuild gcushare device plugin version: '$VERSION'\033[0m"
             ;;
@@ -159,6 +155,7 @@ while true :
                 shift;;
             --version)
                 VERSION=$2
+                SET_VERSION=true
                 shift;;
             --help | -h)
                 usage
@@ -170,6 +167,11 @@ while true :
         esac
     shift
 done
+
+if [ "$SET_VERSION" == "false" ]; then
+    echo -e "\033[32mWarning: The parameter: '--version' default '$VERSION' only apply to k8s1.24+,"\
+    "set to v1beta1 for lower k8s versions\033[0m"
+fi
 
 REPO_FULL_NAME="${REPO_NAME}/${IMAGE_NAME}:${TAG}"
 

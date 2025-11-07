@@ -303,7 +303,7 @@ func TestNewGCUDevicePluginServe(t *testing.T) {
 					Annotations: map[string]string{
 						consts.PodAssignedGCUTime:    "1664506296",
 						consts.PodHasAssignedGCU:     "false",
-						consts.PodAssignedGCUID:      "1",
+						consts.PodAssignedGCUMinor:   "1",
 						consts.PodAssignedContainers: `{"pod-3-c1": "true"}`,
 					},
 				},
@@ -348,9 +348,9 @@ func TestNewGCUDevicePluginServe(t *testing.T) {
 					Namespace: "kube-system",
 					UID:       "pod-4-uid",
 					Annotations: map[string]string{
-						consts.PodAssignedGCUTime: "1664506100",
-						consts.PodHasAssignedGCU:  "false",
-						consts.PodAssignedGCUID:   "3",
+						consts.PodAssignedGCUTime:  "1664506100",
+						consts.PodHasAssignedGCU:   "false",
+						consts.PodAssignedGCUMinor: "3",
 					},
 				},
 				Spec: corev1.PodSpec{
@@ -402,9 +402,9 @@ func TestNewGCUDevicePluginServe(t *testing.T) {
 					Namespace: "kube-system",
 					UID:       "pod-3-uid",
 					Annotations: map[string]string{
-						consts.PodAssignedGCUTime: "1664506296",
-						consts.PodHasAssignedGCU:  "false",
-						consts.PodAssignedGCUID:   "1",
+						consts.PodAssignedGCUTime:  "1664506296",
+						consts.PodHasAssignedGCU:   "false",
+						consts.PodAssignedGCUMinor: "1",
 					},
 				},
 				Spec: corev1.PodSpec{

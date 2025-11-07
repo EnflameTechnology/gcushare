@@ -3,7 +3,6 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -20,11 +19,9 @@ import (
 	"gcushare-device-plugin/pkg/config"
 	"gcushare-device-plugin/pkg/consts"
 	"gcushare-device-plugin/pkg/device"
-	"gcushare-device-plugin/pkg/informer"
 	"gcushare-device-plugin/pkg/kube"
 	"gcushare-device-plugin/pkg/logs"
 	"gcushare-device-plugin/pkg/resource"
-	"gcushare-device-plugin/pkg/structs"
 	"gcushare-device-plugin/pkg/utils"
 )
 
@@ -67,16 +64,10 @@ func NewGCUDevicePluginServe(healthCheck, queryKubelet, drsEnabled bool, client 
 	if err != nil {
 		return nil, err
 	}
-	nodeResource := resource.NewNodeResource(clusterResource)
-	podResource := resource.NewPodResource(clusterResource)
+	nodeResource := resource.NewNodeResource(clusterResource, drsEnabled)
+	podResource := resource.NewPodResource(clusterResource, device.Info)
 	if err := podResource.Informer.Start(context.TODO()); err != nil {
 		return nil, err
-	}
-	if drsEnabled {
-		if err := informer.NewConfigMapInformer(clusterResource.NodeName, device,
-			clusterResource.ClientSet).Start(context.TODO()); err != nil {
-			return nil, err
-		}
 	}
 	fakeDevices, deviceMap := device.GetFakeDevices()
 
@@ -85,9 +76,16 @@ func NewGCUDevicePluginServe(healthCheck, queryKubelet, drsEnabled bool, client 
 	if err != nil {
 		return nil, err
 	}
-	if err := nodeResource.PatchGCUMemoryMapToNode(utils.GetDeviceCapacityMap(fakeDevices), drsEnabled); err != nil {
-		return nil, err
+	if drsEnabled {
+		if err := nodeResource.PatchDRSGCUCapacityToNode(utils.GetDeviceCapacityMap(fakeDevices), device.Info); err != nil {
+			return nil, err
+		}
+	} else {
+		if err := nodeResource.PatchSharedGCUCapacityToNode(utils.GetDeviceCapacityMap(fakeDevices)); err != nil {
+			return nil, err
+		}
 	}
+
 	return &GCUDevicePluginServe{
 		resourceName:  resourceName,
 		fakeDevices:   fakeDevices,
@@ -311,8 +309,14 @@ func (plugin *GCUDevicePluginServe) updateDeviceCapacityMap() error {
 		return nil
 	}
 	logs.Info("list watch will update device capacity information to node annotations")
-	if err := plugin.nodeResource.PatchGCUMemoryMapToNode(deviceCapacityMap, plugin.drsEnabled); err != nil {
-		return err
+	if plugin.drsEnabled {
+		if err := plugin.nodeResource.PatchDRSGCUCapacityToNode(deviceCapacityMap, plugin.device.Info); err != nil {
+			return err
+		}
+	} else {
+		if err := plugin.nodeResource.PatchSharedGCUCapacityToNode(deviceCapacityMap); err != nil {
+			return err
+		}
 	}
 	plugin.deviceCapacityMap = deviceCapacityMap
 	return nil
@@ -343,7 +347,7 @@ func (plugin *GCUDevicePluginServe) Allocate(ctx context.Context, reqs *pluginap
 
 	plugin.Lock()
 	defer plugin.Unlock()
-	assumePod, instanceID, err := plugin.getAssumePod(containerRequest)
+	assumePod, drsInstanceUUID, err := plugin.getAssumePod(containerRequest)
 	if err != nil {
 		return nil, err
 	}
@@ -357,18 +361,8 @@ func (plugin *GCUDevicePluginServe) Allocate(ctx context.Context, reqs *pluginap
 	if err != nil {
 		return nil, err
 	}
-	index := ""
-	if plugin.resourceName == consts.DRSResourceName {
-		assignedDrsDevice := assumePod.Annotations[consts.DRSAssignedDevice]
-		assignedDevice := &structs.DeviceSpec{}
-		if err := json.Unmarshal([]byte(assignedDrsDevice), assignedDevice); err != nil {
-			logs.Error(err, "json unmarshal failed, content: %s", assignedDrsDevice)
-			return nil, err
-		}
-		index = assignedDevice.Index
-	}
 
-	responses, err := plugin.makeContainerResponse(assignedID, index, instanceID)
+	responses, err := plugin.makeContainerResponse(assignedID, drsInstanceUUID)
 	if err != nil {
 		return nil, err
 	}
@@ -378,13 +372,13 @@ func (plugin *GCUDevicePluginServe) Allocate(ctx context.Context, reqs *pluginap
 	return responses, nil
 }
 
-func (plugin *GCUDevicePluginServe) makeContainerResponse(assignedID, index, instanceID string) (
+func (plugin *GCUDevicePluginServe) makeContainerResponse(assignedID, drsInstanceUUID string) (
 	*pluginapi.AllocateResponse, error) {
 	envs := map[string]string{
 		consts.ENFLAME_VISIBLE_DEVICES: assignedID,
 	}
-	if index != "" {
-		envs[consts.TOPS_VISIBLE_DEVICES] = fmt.Sprintf("DRS-%s:%s", index, instanceID)
+	if drsInstanceUUID != "" {
+		envs[consts.TOPS_VISIBLE_DEVICES] = fmt.Sprintf("DRS-%s", drsInstanceUUID)
 	}
 	responses := &pluginapi.AllocateResponse{}
 	response := pluginapi.ContainerAllocateResponse{
@@ -402,12 +396,12 @@ func (plugin *GCUDevicePluginServe) getAssumePod(containerRequest int) (*v1.Pod,
 	}
 
 	var assumePod *v1.Pod
-	drsInstanceID := ""
+	drsInstanceUUID := ""
 	for _, pod := range pods {
 		logs.Info("pod(name: %s, uuid: %s) request %s: %d with timestamp: %v", pod.Name, pod.UID, plugin.resourceName,
 			plugin.podResource.GetGCUMemoryFromPodResource(pod), resource.GetAssumeTimeFromPodAnnotation(pod))
 		if assumePod == nil {
-			ok, instanceID, err := plugin.podResource.PodExistContainerCanBind(containerRequest, pod)
+			ok, instanceUUID, err := plugin.podResource.PodExistContainerCanBind(containerRequest, pod)
 			if err != nil {
 				return nil, "", err
 			}
@@ -417,10 +411,10 @@ func (plugin *GCUDevicePluginServe) getAssumePod(containerRequest int) (*v1.Pod,
 			logs.Info("candidate pod(name: %s, uuid: %s) request %s: %d with timestamp: %v is selected",
 				pod.Name, pod.UID, plugin.resourceName, containerRequest, resource.GetAssumeTimeFromPodAnnotation(pod))
 			assumePod = pod
-			drsInstanceID = instanceID
+			drsInstanceUUID = instanceUUID
 		}
 	}
-	return assumePod, drsInstanceID, nil
+	return assumePod, drsInstanceUUID, nil
 }
 
 func (plugin *GCUDevicePluginServe) GetDevicePluginOptions(context.Context, *pluginapi.Empty) (*pluginapi.DevicePluginOptions, error) {

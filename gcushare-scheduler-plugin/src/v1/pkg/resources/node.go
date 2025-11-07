@@ -10,6 +10,7 @@ import (
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	k8sTypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/kubernetes/pkg/scheduler/framework"
 
@@ -21,7 +22,6 @@ import (
 
 type NodeResource BaseResource
 type NodeName string
-type DeviceID string
 
 func NewNodeResource(baseResource *BaseResource) *NodeResource {
 	return (*NodeResource)(baseResource)
@@ -54,28 +54,29 @@ func (res *NodeResource) IsGCUSharingNode(isDRSPod bool, node *v1.Node) bool {
 	return true
 }
 
-func (res *NodeResource) GetNodeAvailableGCUs(nodeInfo *framework.NodeInfo) (map[DeviceID]int, error) {
-	gcuTotalMemoryMap, err := res.GetGCUDeviceMemoryMap(false, nodeInfo.Node())
+func (res *NodeResource) GetNodeAvailableGCUs(nodeInfo *framework.NodeInfo,
+	getReserveCache func(podUID k8sTypes.UID) (map[string]string, bool)) (map[structs.Minor]int, error) {
+	gcuTotalMemoryMap, err := res.GetGCUDeviceMemoryMap(nodeInfo.Node())
 	if err != nil {
 		return nil, err
 	}
-	availableGCUs := map[DeviceID]int{}
-	nodeUsedMemory, err := NewPodResource((*BaseResource)(res)).GetUsedGCUs(nodeInfo.Pods)
+	availableGCUs := map[structs.Minor]int{}
+	usedSharedGCU, deviceUsedByDRS, err := NewPodResource((*BaseResource)(res)).GetUsedSharedGCU(nodeInfo.Pods, getReserveCache)
 	if err != nil {
 		return nil, err
+	}
+	logs.Info("node: %s already used shared gcus: %v", nodeInfo.Node().Name, usedSharedGCU)
+	if len(deviceUsedByDRS) > 0 {
+		logs.Warn("node: %s following devices are used by drs pod: %v", nodeInfo.Node().Name, deviceUsedByDRS)
 	}
 	for deviceID, totalMemory := range gcuTotalMemoryMap {
-		drsUsed, err := CheckDeviceUsed(deviceID, nodeInfo)
-		if err != nil {
-			return nil, err
-		}
-		if drsUsed {
+		if _, ok := deviceUsedByDRS[deviceID]; ok {
 			continue
 		}
-		availableGCUs[DeviceID(deviceID)] = totalMemory - nodeUsedMemory[deviceID]
-		if availableGCUs[DeviceID(deviceID)] < 0 {
+		availableGCUs[structs.Minor(deviceID)] = totalMemory - usedSharedGCU[deviceID]
+		if availableGCUs[structs.Minor(deviceID)] < 0 {
 			err := fmt.Errorf("device: %s on node: %s total size: %d, but used: %d, gcushare slice count may be modified, which is not allowed",
-				deviceID, nodeInfo.Node().Name, totalMemory, nodeUsedMemory[deviceID])
+				deviceID, nodeInfo.Node().Name, totalMemory, usedSharedGCU[deviceID])
 			logs.Error(err)
 			return nil, err
 		}
@@ -83,15 +84,31 @@ func (res *NodeResource) GetNodeAvailableGCUs(nodeInfo *framework.NodeInfo) (map
 	return availableGCUs, nil
 }
 
-func (res *NodeResource) GetGCUDeviceMemoryMap(drs bool, node *v1.Node) (map[string]int, error) {
-	field := consts.GCUSharedCapacity
-	if drs {
-		field = consts.GCUDRSCapacity
+func (res *NodeResource) GetNodeAvailableDRS(nodeInfo *framework.NodeInfo, devices []structs.DeviceSpec,
+	getReserveCache func(podUID k8sTypes.UID) (map[string]string, bool)) (map[structs.Minor]int, error) {
+	availableDRS := map[structs.Minor]int{}
+	nodeUsedDRS, deviceUsedBySharedGCU, err := NewPodResource((*BaseResource)(res)).GetUsedDRSGCU(nodeInfo.Pods, getReserveCache)
+	if err != nil {
+		return nil, err
 	}
-	annotationMemoryMap, ok := node.Annotations[res.Config.ReplaceDomain(field)]
+	logs.Info("node: %s already used drs device: %v", nodeInfo.Node().Name, nodeUsedDRS)
+	if len(deviceUsedBySharedGCU) > 0 {
+		logs.Warn("node: %s following devices are used by gcushare pod: %v", nodeInfo.Node().Name, deviceUsedBySharedGCU)
+	}
+	for _, devicespec := range devices {
+		if _, ok := deviceUsedBySharedGCU[devicespec.Minor]; ok {
+			continue
+		}
+		availableDRS[structs.Minor(devicespec.Minor)] = devicespec.Capacity - nodeUsedDRS[devicespec.Minor]
+	}
+	return availableDRS, nil
+}
+
+func (res *NodeResource) GetGCUDeviceMemoryMap(node *v1.Node) (map[string]int, error) {
+	annotationMemoryMap, ok := node.Annotations[res.Config.ReplaceDomain(consts.GCUSharedCapacity)]
 	if !ok {
 		err := fmt.Errorf("annotation field: %s not found in node: %s, node annotations: %v",
-			res.Config.ReplaceDomain(field), node.Name, node.Annotations)
+			res.Config.ReplaceDomain(consts.GCUSharedCapacity), node.Name, node.Annotations)
 		logs.Error(err)
 		return nil, err
 	}
@@ -137,24 +154,4 @@ func WaitDevicePluginRunning(clientSet *kubernetes.Clientset, config *config.Con
 		}
 		time.Sleep(time.Second * 3)
 	}
-}
-
-func CheckDeviceUsed(deviceID string, nodeInfo *framework.NodeInfo) (bool, error) {
-	for _, pod := range nodeInfo.Pods {
-		drsDevice, ok := pod.Pod.Annotations[consts.DRSAssignedDevice]
-		if !ok {
-			continue
-		}
-		assignedDevice := &structs.DeviceSpec{}
-		if err := json.Unmarshal([]byte(drsDevice), assignedDevice); err != nil {
-			logs.Error(err, "json unmarshal failed, content: %s", drsDevice)
-			return false, err
-		}
-		if assignedDevice.Minor == deviceID {
-			logs.Warn("device: %s is using by drs pod(name: %s, uuid: %s), skip it", deviceID,
-				pod.Pod.Name, pod.Pod.UID)
-			return true, nil
-		}
-	}
-	return false, nil
 }

@@ -5,11 +5,19 @@ import (
 	"bytes"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"gcushare-device-plugin/pkg/consts"
 	"gcushare-device-plugin/pkg/logs"
 	"gcushare-device-plugin/pkg/utils"
+)
+
+type (
+	ProfileID    string
+	ProfileName  string
+	InstanceID   string
+	InstanceUUID string
 )
 
 type SmiDeviceInfo struct {
@@ -19,30 +27,28 @@ type SmiDeviceInfo struct {
 	GCUVirt  string `json:"gcuVirt"`
 }
 
-type Profile struct {
-	Index         string `json:"index"`
-	ProfileName   string `json:"profileName"`
-	ProfileID     string `json:"profileID"`
-	InstanceCount string `json:"instanceCount"`
-	Memory        string `json:"memory"`
-	Sip           string `json:"sip"`
+type ProfileSpec struct {
+	ProfileID     string                      `json:"profileID"`
+	InstanceCount int                         `json:"instanceCount"`
+	Memory        string                      `json:"memory"`
+	Sip           string                      `json:"sip"`
+	Instances     map[InstanceID]InstanceUUID `json:"instances,omitempty"`
+	Available     int                         `json:"available"`
 }
 
 type Instance struct {
 	Index       string `json:"index"`
 	ProfileName string `json:"profileName"`
-	ProfileID   string `json:"profileID"`
 	InstanceID  string `json:"instanceID"`
-	Placement   string `json:"placement"`
+	UUID        string `json:"uuid"`
 }
 
-func GetDeviceInfoFromSmi() ([]SmiDeviceInfo, error) {
+func Smi() ([]string, error) {
 	cmd := "efsmi"
 	output, err := utils.ExecCommand("sh", "-c", cmd)
 	if err != nil {
 		return nil, err
 	}
-
 	scanner := bufio.NewScanner(bytes.NewReader([]byte(output)))
 	var lines []string
 	for scanner.Scan() {
@@ -51,6 +57,15 @@ func GetDeviceInfoFromSmi() ([]SmiDeviceInfo, error) {
 			lines = append(lines, line)
 		}
 	}
+	return lines, nil
+}
+
+func GetDeviceInfoFromSmi() ([]SmiDeviceInfo, error) {
+	lines, err := Smi()
+	if err != nil {
+		return nil, err
+	}
+
 	busPattern := regexp.MustCompile(`[0-9a-fA-F]{2}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7]`)
 	var devices []SmiDeviceInfo
 
@@ -79,18 +94,15 @@ func GetDeviceInfoFromSmi() ([]SmiDeviceInfo, error) {
 	return devices, nil
 }
 
-func ListProfile(index string) ([]Profile, error) {
-	cmd := "efsmi --drs --list-profile"
-	if index != "" {
-		cmd = fmt.Sprintf("efsmi -i %s --drs --list-profile", index)
-	}
+func ListProfile(index string) (map[ProfileName]ProfileSpec, error) {
+	cmd := fmt.Sprintf("efsmi -i %s --drs --list-profile", index)
 	output, err := utils.ExecCommand("sh", "-c", cmd)
 	if err != nil {
 		return nil, err
 	}
 	profilePattern := regexp.MustCompile(consts.ProfileNameRegExp)
 	scanner := bufio.NewScanner(bytes.NewReader([]byte(output)))
-	profileList := []Profile{}
+	profileTemplate := make(map[ProfileName]ProfileSpec)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if !profilePattern.MatchString(line) {
@@ -98,22 +110,30 @@ func ListProfile(index string) ([]Profile, error) {
 		}
 		line = strings.Trim(line, "|")
 		fieldsList := strings.Fields(line)
-		profileList = append(profileList, Profile{
-			Index:         fieldsList[0],
-			ProfileName:   fieldsList[1],
+
+		profileName := fieldsList[1]
+		instanceCount, err := strconv.Atoi(fieldsList[3])
+		if err != nil {
+			logs.Error(err, "parse instance count: %s to int failed, device index: %s, profile name: %s",
+				fieldsList[3], index, profileName)
+			return nil, err
+		}
+		profileSpec := ProfileSpec{
 			ProfileID:     fieldsList[2],
-			InstanceCount: fieldsList[3],
+			InstanceCount: instanceCount,
 			Memory:        fieldsList[4],
 			Sip:           fieldsList[5],
-		})
+			Available:     instanceCount,
+		}
+		profileTemplate[ProfileName(profileName)] = profileSpec
 	}
-	return profileList, nil
+	return profileTemplate, nil
 }
 
 func ListInstance(index string) ([]Instance, error) {
-	cmd := "efsmi --drs --list-instance"
+	cmd := "efsmi -L"
 	if index != "" {
-		cmd = fmt.Sprintf("efsmi -i %s --drs --list-instance", index)
+		cmd = fmt.Sprintf("efsmi -i %s -L", index)
 	}
 	output, err := utils.ExecCommand("sh", "-c", cmd)
 	if err != nil {
@@ -132,9 +152,8 @@ func ListInstance(index string) ([]Instance, error) {
 		instanceList = append(instanceList, Instance{
 			Index:       fieldsList[0],
 			ProfileName: fieldsList[1],
-			ProfileID:   fieldsList[2],
-			InstanceID:  fieldsList[3],
-			Placement:   fieldsList[4],
+			InstanceID:  fieldsList[2],
+			UUID:        fieldsList[3],
 		})
 	}
 	return instanceList, nil

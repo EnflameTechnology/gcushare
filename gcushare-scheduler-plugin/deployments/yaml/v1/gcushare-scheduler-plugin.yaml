@@ -176,14 +176,9 @@ data:
           filter:
             enabled:
             - name: GCUShareSchedulerPlugin
-          preBind:
+          reserve:
             enabled:
             - name: GCUShareSchedulerPlugin
-          bind:
-            enabled:
-            - name: GCUShareSchedulerPlugin
-            disabled:
-            - name: DefaultBinder
 ---
 kind: Deployment
 apiVersion: apps/v1

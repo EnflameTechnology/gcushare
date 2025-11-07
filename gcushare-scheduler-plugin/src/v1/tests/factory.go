@@ -33,7 +33,7 @@ func NewPod(podName, podUID, deviceID, request string, limits ...int) *v1.Pod {
 		},
 	}
 	if deviceID != "" {
-		pod.Annotations[consts.PodAssignedGCUID] = deviceID
+		pod.Annotations[consts.PodAssignedGCUMinor] = deviceID
 	}
 	if request != "" {
 		pod.Annotations[consts.PodRequestGCUSize] = request

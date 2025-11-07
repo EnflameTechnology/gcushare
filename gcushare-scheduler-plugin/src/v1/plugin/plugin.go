@@ -21,14 +21,11 @@ import (
 	"gcushare-scheduler-plugin/pkg/logs"
 	"gcushare-scheduler-plugin/pkg/resources"
 	"gcushare-scheduler-plugin/pkg/structs"
-	"gcushare-scheduler-plugin/pkg/utils"
 )
 
 type filterResult struct {
-	isDRSPod     bool
-	resourceName string
-	configmaps   map[resources.NodeName]*v1.ConfigMap
-	allAvailable map[resources.NodeName]map[resources.DeviceID]int
+	allAvailable map[resources.NodeName]map[structs.Minor]int
+	drsCapacity  map[resources.NodeName]structs.DRSGCUCapacity
 }
 
 type GCUShareSchedulerPlugin struct {
@@ -38,80 +35,65 @@ type GCUShareSchedulerPlugin struct {
 	clientset          *kubernetes.Clientset
 	config             *config.Config
 	filterCache        map[k8sTypes.UID]filterResult
+	reserveCache       map[k8sTypes.UID]map[string]string
 
 	podResource  *resources.PodResource
 	nodeResource *resources.NodeResource
 }
 
 var _ framework.FilterPlugin = &GCUShareSchedulerPlugin{}
-var _ framework.PreBindPlugin = &GCUShareSchedulerPlugin{}
-var _ framework.BindPlugin = &GCUShareSchedulerPlugin{}
+var _ framework.ReservePlugin = &GCUShareSchedulerPlugin{}
 
 func (gsp *GCUShareSchedulerPlugin) Name() string {
 	return consts.SchedulerPluginName
 }
 
-func (fr filterResult) addFilterResult(nodeName string, pod *v1.Pod, nodeAvailableGCUs map[resources.DeviceID]int, cm *v1.ConfigMap) {
-	if fr.isDRSPod {
-		logs.Info("add drs pod(name: %s, uuid: %s) filter result to filter cache", pod.Name, pod.UID)
-		fr.configmaps[resources.NodeName(nodeName)] = cm
-	} else {
-		logs.Info("add gcushare pod(name: %s, uuid: %s) filter result of node: %s to filter cache", pod.Name, pod.UID, nodeName)
-		fr.allAvailable[resources.NodeName(nodeName)] = nodeAvailableGCUs
+func (fr filterResult) addFilterResult(nodeName string, pod *v1.Pod, nodeAvailableGCUs map[structs.Minor]int,
+	nodeDeviceSpec structs.DRSGCUCapacity) {
+	logs.Info("add pod(name: %s, uuid: %s) filter result of node: %s to filter cache", pod.Name, pod.UID, nodeName)
+	fr.allAvailable[resources.NodeName(nodeName)] = nodeAvailableGCUs
+	if nodeDeviceSpec.Devices != nil {
+		fr.drsCapacity[resources.NodeName(nodeName)] = nodeDeviceSpec
 	}
 }
 
 func (gsp *GCUShareSchedulerPlugin) addFilterCache(status *framework.Status, pod *v1.Pod,
-	nodeName string, nodeAvailableGCUs *map[resources.DeviceID]int, cm *v1.ConfigMap) {
-	gsp.mu.Lock()
-	defer gsp.mu.Unlock()
+	nodeName string, nodeAvailableGCUs *map[structs.Minor]int, nodeDeviceSpec *structs.DRSGCUCapacity) {
 	if status.Code() != framework.Success {
 		logs.Warn("pod(name: %s, uuid: %s) filter failed, need not to add to filter cache", pod.Name, pod.UID)
 		return
 	}
-	isDRSPod := gsp.podResource.IsDrsGCUsharingPod(pod)
-	if isDRSPod {
-		gsp.filterCache[pod.UID] = filterResult{
-			isDRSPod:     isDRSPod,
-			resourceName: gsp.drsResourceName,
-			configmaps:   map[resources.NodeName]*v1.ConfigMap{},
-		}
-	} else {
-		gsp.filterCache[pod.UID] = filterResult{
-			isDRSPod:     isDRSPod,
-			resourceName: gsp.sharedResourceName,
-			allAvailable: map[resources.NodeName]map[resources.DeviceID]int{},
-		}
-	}
-	gsp.filterCache[pod.UID].addFilterResult(nodeName, pod, *nodeAvailableGCUs, cm)
-}
-
-func (gsp *GCUShareSchedulerPlugin) clearFilterCache(caller string, pod *v1.Pod) {
 	gsp.mu.Lock()
 	defer gsp.mu.Unlock()
-	if gsp.filterCache[pod.UID].isDRSPod {
-		for _, configMap := range gsp.filterCache[pod.UID].configmaps {
-			gsp.clearConfigMap(configMap.Name, configMap.Namespace)
+	if _, exist := gsp.filterCache[pod.UID]; !exist {
+		logs.Info("init filterCache for pod(name: %s, uuid: %s)", pod.Name, pod.UID)
+		gsp.filterCache[pod.UID] = filterResult{
+			allAvailable: map[resources.NodeName]map[structs.Minor]int{},
+			drsCapacity:  map[resources.NodeName]structs.DRSGCUCapacity{},
 		}
 	}
+	gsp.filterCache[pod.UID].addFilterResult(nodeName, pod, *nodeAvailableGCUs, *nodeDeviceSpec)
+}
+
+func (gsp *GCUShareSchedulerPlugin) clearFilterCache(pod *v1.Pod) {
+	gsp.mu.Lock()
+	defer gsp.mu.Unlock()
 	delete(gsp.filterCache, pod.UID)
-	logs.Info("%s clear filter cache for pod(name: %s, uuid: %s)", caller, pod.Name, pod.UID)
 }
 
 func (gsp *GCUShareSchedulerPlugin) Filter(ctx context.Context, state *framework.CycleState, pod *v1.Pod,
 	nodeInfo *framework.NodeInfo) (status *framework.Status) {
+	var nodeAvailableGCUs map[structs.Minor]int
+	var nodeDeviceSpec structs.DRSGCUCapacity
 	defer func() {
 		if r := recover(); r != nil {
 			errMsg := fmt.Sprintf("Internal error! Recovered from panic: %v", r)
 			logs.Error(errMsg)
 			status = framework.NewStatus(framework.Error, errMsg)
 		}
+		gsp.addFilterCache(status, pod, nodeInfo.Node().Name, &nodeAvailableGCUs, &nodeDeviceSpec)
 	}()
-	var nodeAvailableGCUs map[resources.DeviceID]int
-	var configMap v1.ConfigMap
-	defer func() {
-		gsp.addFilterCache(status, pod, nodeInfo.Node().Name, &nodeAvailableGCUs, &configMap)
-	}()
+
 	podName := pod.Name
 	nodeName := nodeInfo.Node().Name
 	logs.Info("----------filter node: %s for pod(name: %s, uuid: %s)----------", nodeName, podName, pod.UID)
@@ -120,50 +102,29 @@ func (gsp *GCUShareSchedulerPlugin) Filter(ctx context.Context, state *framework
 		err := fmt.Errorf("pod(name: %s, uuid: %s) does not request %v, please do not specify the scheduler name: %s",
 			podName, pod.UID, []string{gsp.sharedResourceName, gsp.drsResourceName}, consts.SchedulerName)
 		logs.Error(err)
-		return framework.NewStatus(framework.Error, err.Error())
+		return framework.NewStatus(framework.Unschedulable, err.Error())
 	}
 	if gsp.podResource.IsGCUsharingPod(pod) && isDRSPod {
 		err := fmt.Errorf("it is not allowed for pod(name: %s, uuid: %s) request %s and %s at the same time",
 			podName, pod.UID, gsp.sharedResourceName, gsp.drsResourceName)
 		logs.Error(err)
-		return framework.NewStatus(framework.Error, err.Error())
+		return framework.NewStatus(framework.Unschedulable, err.Error())
 	}
 	if !gsp.nodeResource.IsGCUSharingNode(isDRSPod, nodeInfo.Node()) {
 		msg := fmt.Sprintf("node: %s is not gcushare node, skip it", nodeInfo.Node().Name)
 		logs.Warn(msg)
 		return framework.NewStatus(framework.Unschedulable, msg)
 	}
-	if !gsp.previousPodHasBind(pod) {
-		return framework.NewStatus(framework.Error, "wait previous pods bind finish")
-	}
 	if isDRSPod {
-		return gsp.filterNodeForDRS(pod, nodeInfo, &configMap)
+		return gsp.filterNodeForDRS(pod, nodeInfo, &nodeAvailableGCUs, &nodeDeviceSpec)
 	}
 	return gsp.filterNode(pod, nodeInfo, &nodeAvailableGCUs)
 }
 
-func (gsp *GCUShareSchedulerPlugin) previousPodHasBind(pod *v1.Pod) bool {
-	maxRetryTimes := 5
-	for i := 0; i < maxRetryTimes; i++ {
-		_, isSelf := gsp.filterCache[pod.UID]
-		if len(gsp.filterCache) == 0 || (len(gsp.filterCache) == 1 && isSelf) {
-			return true
-		}
-		logs.Warn("pod(name: %s, uuid: %s) in-place wait previous pods bind finish, retry times: %d, detail: %v",
-			pod.Name, pod.UID, i, gsp.filterCache)
-		time.Sleep(1 * time.Second)
-	}
-	msg := fmt.Sprintf("previous pods bind not finish in max retry time: %d, ", maxRetryTimes)
-	msg += fmt.Sprintf("pod(name: %s, uuid: %s) cannot be scheduled and will be re-joined to the scheduling queue",
-		pod.Name, pod.UID)
-	logs.Error(msg)
-	return false
-}
-
 func (gsp *GCUShareSchedulerPlugin) filterNode(pod *v1.Pod, nodeInfo *framework.NodeInfo,
-	nodeAvailableGCUs *map[resources.DeviceID]int) *framework.Status {
+	nodeAvailableGCUs *map[structs.Minor]int) *framework.Status {
 	var err error
-	*nodeAvailableGCUs, err = gsp.nodeResource.GetNodeAvailableGCUs(nodeInfo)
+	*nodeAvailableGCUs, err = gsp.nodeResource.GetNodeAvailableGCUs(nodeInfo, gsp.getReserveCache)
 	if err != nil {
 		return framework.NewStatus(framework.Error, err.Error())
 	}
@@ -183,348 +144,121 @@ func (gsp *GCUShareSchedulerPlugin) filterNode(pod *v1.Pod, nodeInfo *framework.
 }
 
 func (gsp *GCUShareSchedulerPlugin) filterNodeForDRS(pod *v1.Pod, nodeInfo *framework.NodeInfo,
-	cmForCache *v1.ConfigMap) (status *framework.Status) {
-	configmapName := fmt.Sprintf("%s.%s.%s.%s.configmap", pod.Name, pod.Namespace,
-		strings.Split(string(pod.UID), "-")[0], nodeInfo.Node().Name)
-	configmapNamespace := pod.Namespace
-	defer func() {
-		if status.Code() != framework.Success {
-			gsp.clearConfigMap(configmapName, configmapNamespace)
-		}
-	}()
-	gcusharePods := []structs.GCUSharePod{}
-	for _, podInfo := range nodeInfo.Pods {
-		// Need to record the list of pods that use the shared GCU as non-drs
-		if !gsp.podResource.IsGCUsharingPod(podInfo.Pod) {
-			continue
-		}
-		podDeleted, assignedID := gsp.podResource.GetPodAssignedDeviceIDWithRetry(podInfo)
-		if podDeleted {
-			continue
-		}
-		if assignedID == "" {
-			err := fmt.Errorf("assignedID not found in pod(name: %s, uuid: %s) annotations with maxRetryTimes: %d",
-				podInfo.Pod.Name, podInfo.Pod.UID, consts.MaxRetryTimes)
-			logs.Error(err)
-			return framework.NewStatus(framework.Error, err.Error())
-		}
-		gcusharePods = append(gcusharePods, structs.GCUSharePod{
-			Name:       podInfo.Pod.Name,
-			Namespace:  podInfo.Pod.Namespace,
-			Uuid:       podInfo.Pod.UID,
-			AssignedID: assignedID,
-		})
+	nodeAvailableDRS *map[structs.Minor]int, nodeDeviceSpec *structs.DRSGCUCapacity) (status *framework.Status) {
+	nodeDevice, ok := nodeInfo.Node().Annotations[consts.GCUDRSCapacity]
+	if !ok {
+		err := fmt.Errorf("node: %s missing drs gcu capacity annotations: %v", nodeInfo.Node().Name, nodeInfo.Node().Annotations)
+		logs.Error(err)
+		return framework.NewStatus(framework.Unschedulable, err.Error())
 	}
-	if err := gsp.createConfigMap(nodeInfo.Node().Name, configmapName, pod, gcusharePods); err != nil {
+	deviceCapacity := &structs.DRSGCUCapacity{}
+	if err := json.Unmarshal([]byte(nodeDevice), deviceCapacity); err != nil {
+		logs.Error(err, "json unmarshal failed, content: %s", nodeDevice)
 		return framework.NewStatus(framework.Error, err.Error())
 	}
-	logs.Info("wait for device-plugin to confirm whether the node: %s has an available drs device", nodeInfo.Node().Name)
-	cm, status := gsp.waitConfigmapAssignDRSDevice(nodeInfo.Node().Name, configmapName, pod)
-	if status.Code() != framework.Success {
-		return status
+	if err := gsp.allExpectedProfileExist(deviceCapacity.Profiles, pod); err != nil {
+		return framework.NewStatus(framework.Unschedulable, err.Error())
 	}
-	*cmForCache = *cm
+	*nodeDeviceSpec = *deviceCapacity
+	var err error
+	*nodeAvailableDRS, err = gsp.nodeResource.GetNodeAvailableDRS(nodeInfo, deviceCapacity.Devices, gsp.getReserveCache)
+	if err != nil {
+		return framework.NewStatus(framework.Error, err.Error())
+	}
+	logs.Info("node: %s available %s: %v", nodeInfo.Node().Name, gsp.drsResourceName, *nodeAvailableDRS)
+	podRequest := gsp.podResource.GetRequestDrsPodResource(pod)
+	for _, available := range *nodeAvailableDRS {
+		if available >= podRequest {
+			logs.Info("pod(name: %s, uuid: %s) request %s: %d, and node: %s is available",
+				pod.Name, pod.UID, gsp.drsResourceName, podRequest, nodeInfo.Node().Name)
+			return framework.NewStatus(framework.Success)
+		}
+	}
+	msg := fmt.Sprintf("pod(name: %s, uuid: %s) request %s: %d, but it is insufficient of node: %s",
+		pod.Name, pod.UID, gsp.drsResourceName, podRequest, nodeInfo.Node().Name)
+	logs.Warn(msg)
+	return framework.NewStatus(framework.Unschedulable, msg)
+}
+
+func (gsp *GCUShareSchedulerPlugin) allExpectedProfileExist(profileMap map[structs.ProfileName]structs.ProfileID, pod *v1.Pod) error {
+	profileNamePrefixMap := gsp.getProfileNamePrefixMap(profileMap)
+	podExpectedProfile := map[string]int{}
+	for _, container := range pod.Spec.Containers {
+		if val, ok := container.Resources.Limits[v1.ResourceName(gsp.drsResourceName)]; ok {
+			podExpectedProfile[fmt.Sprintf("%dg", int(val.Value()))] += 1
+		}
+	}
+	for profileNamePrefix := range podExpectedProfile {
+		if _, ok := profileNamePrefixMap[profileNamePrefix]; !ok {
+			err := fmt.Errorf("pod(name: %s, uuid: %s) expected profile name prefix: %s not found in profile map: %v",
+				pod.Name, pod.UID, profileNamePrefix, profileMap)
+			logs.Error(err)
+			return err
+		}
+	}
+	return nil
+}
+
+func (gsp *GCUShareSchedulerPlugin) getProfileNamePrefixMap(
+	profileMap map[structs.ProfileName]structs.ProfileID) map[string]structs.ProfileName {
+	profileNamePrefix := make(map[string]structs.ProfileName, len(profileMap))
+	for profileName := range profileMap {
+		profileNamePrefix[strings.Split(string(profileName), ".")[0]] = profileName
+	}
+	logs.Info("profile name prefix map: %v", profileNamePrefix)
+	return profileNamePrefix
+}
+
+func (gsp *GCUShareSchedulerPlugin) Reserve(ctx context.Context, state *framework.CycleState, pod *v1.Pod,
+	nodeName string) (status *framework.Status) {
+	logs.Info("----------reserve pod(name: %s, uuid: %s) on node: %s----------", pod.Name, pod.UID, nodeName)
+	defer func() {
+		if r := recover(); r != nil {
+			errMsg := fmt.Sprintf("Internal error! Recovered from panic: %v", r)
+			logs.Error(errMsg)
+			status = framework.NewStatus(framework.Error, errMsg)
+		}
+		if status.Code() == framework.Success {
+			logs.Info("Reserve will clear filter cache for pod(name: %s, uuid: %s) with status: %s",
+				pod.Name, pod.UID, status.Code())
+			gsp.clearFilterCache(pod)
+		}
+	}()
+
+	selectedID, err := gsp.allocatedDeviceID(nodeName, pod)
+	if err != nil {
+		return framework.NewStatus(framework.Error, err.Error())
+	}
+	if err := gsp.patchAssignedResult(pod, selectedID, nodeName); err != nil {
+		return framework.NewStatus(framework.Error, err.Error())
+	}
+	logs.Info("reserve pod(name: %s, uuid: %s) on node: %s success", pod.Name, pod.UID, nodeName)
 	return framework.NewStatus(framework.Success)
 }
 
-func (gsp *GCUShareSchedulerPlugin) createConfigMap(nodeName, configmapName string, pod *v1.Pod,
-	gcusharePods []structs.GCUSharePod) error {
-	schedulerRecord := structs.SchedulerRecord{
-		Filter: &structs.FilterSpec{
-			GCUSharePods: gcusharePods,
-			Containers:   gsp.podResource.InitPodAssignedContainers(pod),
-		},
-	}
-	schedulerRecordBytes, err := json.Marshal(schedulerRecord)
-	if err != nil {
-		logs.Error(err, "json marshal failed, content: %v", schedulerRecord)
-		return err
-	}
-	configMap := &v1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      configmapName,
-			Namespace: pod.Namespace,
-			Labels: map[string]string{
-				consts.ConfigMapNode:  nodeName,
-				consts.ConfigMapOwner: consts.DRSSchedulerName,
-			},
-		},
-		Data: map[string]string{
-			consts.SchedulerRecord: string(schedulerRecordBytes),
-		},
-	}
-	logs.Debug("configmap for pod(name: %s, uuid: %s) will be created, detail: %s",
-		pod.Name, pod.UID, utils.JsonMarshalIndent(configMap))
-	if _, err := gsp.clientset.CoreV1().ConfigMaps(configMap.Namespace).Create(context.TODO(), configMap,
-		metav1.CreateOptions{}); err != nil {
-		logs.Error(err, "create configMap: %s failed", configmapName)
-		return err
-	}
-	logs.Info("create configmap: %s for pod(name: %s, uuid: %s) success", configMap.Name, pod.Name, pod.UID)
-	return nil
+func (gsp *GCUShareSchedulerPlugin) Unreserve(ctx context.Context, state *framework.CycleState, pod *v1.Pod, nodeName string) {
+	logs.Info("----------unreserve pod(name: %s, uuid: %s) on node: %s----------", pod.Name, pod.UID, nodeName)
+	logs.Warn("The pod Reserve failed to initiate this method, but it does not need to be handled for the time being")
 }
 
-func (gsp *GCUShareSchedulerPlugin) waitConfigmapAssignDRSDevice(nodeName, configmapName string, pod *v1.Pod) (
-	*v1.ConfigMap, *framework.Status) {
-	for retryTime := 0; retryTime < consts.MaxRetryTimes; retryTime++ {
-		time.Sleep(1 * time.Second)
-		cm, err := gsp.clientset.CoreV1().ConfigMaps(pod.Namespace).Get(context.TODO(), configmapName,
-			metav1.GetOptions{})
-		if err != nil {
-			logs.Error(err, "get configmap: %s failed, retry times: %d", configmapName, retryTime)
-			return nil, framework.NewStatus(framework.Error, err.Error())
-		}
-		result := cm.Data[consts.SchedulerRecord]
-		schedulerRecord := &structs.SchedulerRecord{}
-		if err := json.Unmarshal([]byte(result), schedulerRecord); err != nil {
-			logs.Error(err, "json unmarshal failed, detail: %s", result)
-			return nil, framework.NewStatus(framework.Error, err.Error())
-		}
-		status := schedulerRecord.Filter.Status
-		switch status {
-		case "":
-			logs.Warn("configmap: %s handler for filter not work finish, retry times: %d", configmapName, retryTime)
-			continue
-		case consts.StateSuccess:
-			logs.Info("configmap: %s filter node: %s for pod(name: %s, uuid: %s) success, detail: %s", configmapName,
-				nodeName, pod.Name, pod.UID, utils.ConvertToString(*schedulerRecord.Filter))
-			return cm, framework.NewStatus(framework.Success)
-		case consts.StateError:
-			err := fmt.Errorf("configmap: %s filter node: %s for pod(name: %s, uuid: %s) failed: %s", configmapName,
-				nodeName, pod.Name, pod.UID, schedulerRecord.Filter.Message)
-			logs.Error(err)
-			return nil, framework.NewStatus(framework.Error, err.Error())
-		case consts.StateUnschedulable:
-			msg := fmt.Sprintf("configmap: %s filter node: %s for pod(name: %s, uuid: %s) failed: %s", configmapName,
-				nodeName, pod.Name, pod.UID, schedulerRecord.Filter.Message)
-			logs.Warn(msg)
-			return nil, framework.NewStatus(framework.Unschedulable, msg)
-		default:
-			err = fmt.Errorf("internal error: configmap: %s filter node: %s for pod(name: %s, uuid: %s) failed: unexpected status: %s",
-				configmapName, nodeName, pod.Name, pod.UID, status)
-			logs.Error(err)
-			return nil, framework.NewStatus(framework.Error, err.Error())
-		}
-	}
-	err := fmt.Errorf("wait for configmap: %s handler for filter of pod(name: %s, uuid: %s) timeout with maxRetryTimes: %d",
-		configmapName, pod.Name, pod.UID, consts.MaxRetryTimes)
-	logs.Error(err)
-	return nil, framework.NewStatus(framework.Error, err.Error())
-}
-
-func (gsp *GCUShareSchedulerPlugin) clearConfigMap(name, namespace string) {
-	for retryTime := 0; retryTime < consts.MaxRetryTimes; retryTime++ {
-		if err := gsp.clientset.CoreV1().ConfigMaps(namespace).Delete(context.TODO(), name,
-			metav1.DeleteOptions{}); err != nil && !k8serr.IsNotFound(err) {
-			logs.Error(err, "delete configmap(name: %s, namespace: %s) failed, retry times: %d",
-				name, namespace, retryTime)
-			time.Sleep(3 * time.Second)
-			continue
-		}
-		logs.Info("delete configmap(name: %s, namespace: %s) success", name, namespace)
-		return
-	}
-	logs.Error("delete configmap(name: %s, namespace: %s) timeout, retry times: %d", name, namespace, consts.MaxRetryTimes)
-}
-
-func (gsp *GCUShareSchedulerPlugin) PreBind(ctx context.Context, state *framework.CycleState, pod *v1.Pod,
-	nodeName string) (status *framework.Status) {
-	defer func() {
-		if r := recover(); r != nil {
-			errMsg := fmt.Sprintf("Internal error! Recovered from panic: %v", r)
-			logs.Error(errMsg)
-			status = framework.NewStatus(framework.Error, errMsg)
-		}
-	}()
-	defer func() {
-		if status.Code() != framework.Success {
-			logs.Warn("PreBind will clear filter cache for pod(name: %s, uuid: %s) with status: %s",
-				pod.Name, pod.UID, status.Code())
-			gsp.clearFilterCache("PreBind", pod)
-		}
-	}()
-	logs.Info("----------preBind pod(name: %s, uuid: %s) to node: %s----------", pod.Name, pod.UID, nodeName)
-	if gsp.filterCache[pod.UID].isDRSPod {
-		cm := gsp.filterCache[pod.UID].configmaps[resources.NodeName(nodeName)]
-		cm, status := gsp.patchConfigmapCreateDRS(cm, pod)
-		if status.Code() != framework.Success {
-			return status
-		}
-		if err := gsp.patchAssignedResult(cm, pod); err != nil {
-			return framework.NewStatus(framework.Error, err.Error())
-		}
-	} else {
-		if err := gsp.allocatedDeviceID(nodeName, pod); err != nil {
-			return framework.NewStatus(framework.Error, err.Error())
-		}
-	}
-	return framework.NewStatus(framework.Success, "")
-}
-
-func (gsp *GCUShareSchedulerPlugin) Bind(ctx context.Context, state *framework.CycleState,
-	pod *v1.Pod, nodeName string) (status *framework.Status) {
-	defer func() {
-		if r := recover(); r != nil {
-			errMsg := fmt.Sprintf("Internal error! Recovered from panic: %v", r)
-			logs.Error(errMsg)
-			status = framework.NewStatus(framework.Error, errMsg)
-		}
-	}()
-	defer func() {
-		logs.Warn("Bind will clear filter cache for pod(name: %s, uuid: %s) with status: %s",
-			pod.Name, pod.UID, status.Code())
-		gsp.clearFilterCache("Bind", pod)
-	}()
-	logs.Info("----------bind pod(name: %s, uuid: %s) to node: %s----------", pod.Name, pod.UID, nodeName)
-
-	if err := gsp.clientset.CoreV1().Pods(pod.Namespace).Bind(context.TODO(), &v1.Binding{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      pod.Name,
-			Namespace: pod.Namespace,
-		},
-		Target: v1.ObjectReference{
-			Kind: "Node",
-			Name: nodeName,
-		},
-	}, metav1.CreateOptions{}); err != nil {
-		logs.Error(err, "bind pod(name: %s, uuid: %s) to node %s failed", pod.Name, pod.UID, nodeName)
-		return framework.NewStatus(framework.Error, err.Error())
-	}
-	logs.Info("binding pod(name: %s, uuid: %s) to node %s success", pod.Name, pod.UID, nodeName)
-	return framework.NewStatus(framework.Success, "")
-}
-
-func (gsp *GCUShareSchedulerPlugin) patchConfigmapCreateDRS(cm *v1.ConfigMap, pod *v1.Pod) (*v1.ConfigMap, *framework.Status) {
-	schedulerRecordString := cm.Data[consts.SchedulerRecord]
-	schedulerRecord := &structs.SchedulerRecord{}
-	if err := json.Unmarshal([]byte(schedulerRecordString), schedulerRecord); err != nil {
-		logs.Error(err, "json unmarshal failed, detail: %s", schedulerRecordString)
-		return nil, framework.NewStatus(framework.Error, err.Error())
-	}
-	schedulerRecord.PreBind = &structs.PreBindSpec{
-		Containers: schedulerRecord.Filter.Containers,
-	}
-	schedulerRecordBytes, err := json.Marshal(schedulerRecord)
-	if err != nil {
-		logs.Error(err, "json marshal failed, content: %v", *schedulerRecord)
-		return nil, framework.NewStatus(framework.Error, err.Error())
-	}
-
-	patchData := map[string]interface{}{
-		"data": map[string]string{
-			consts.SchedulerRecord: string(schedulerRecordBytes),
-		},
-	}
-	patchBytes, err := json.Marshal(patchData)
-	if err != nil {
-		logs.Error(err, "json marshal failed, content: %v", patchData)
-		return nil, framework.NewStatus(framework.Error, err.Error())
-	}
-
-	if _, err := gsp.clientset.CoreV1().ConfigMaps(cm.Namespace).Patch(
-		context.TODO(),
-		cm.Name,
-		k8sTypes.MergePatchType,
-		patchBytes,
-		metav1.PatchOptions{},
-	); err != nil {
-		logs.Error(err, "patch configmap: %s failed", cm.Name)
-		return nil, framework.NewStatus(framework.Error, err.Error())
-	}
-	logs.Info("preBind exetend points patch configmap: %s success, content: %s", cm.Name, string(patchBytes))
-	logs.Info("preBind exetend points wait configmap: %s create drs...", cm.Name)
-	return gsp.waitDRSCreateFinish(cm, pod)
-}
-
-func (gsp *GCUShareSchedulerPlugin) waitDRSCreateFinish(cm *v1.ConfigMap, pod *v1.Pod) (*v1.ConfigMap, *framework.Status) {
-	for retryTime := 0; retryTime < consts.MaxRetryTimes; retryTime++ {
-		time.Sleep(1 * time.Second)
-		cm, err := gsp.clientset.CoreV1().ConfigMaps(cm.Namespace).Get(context.TODO(), cm.Name, metav1.GetOptions{})
-		if err != nil {
-			logs.Error(err, "get configmap: %s from cluster failed, retry times: %d", cm.Name, retryTime)
-			return nil, framework.NewStatus(framework.Error, err.Error())
-		}
-		result := cm.Data[consts.SchedulerRecord]
-		schedulerRecord := &structs.SchedulerRecord{}
-		if err := json.Unmarshal([]byte(result), schedulerRecord); err != nil {
-			logs.Error(err, "json unmarshal failed, detail: %s", result)
-			return nil, framework.NewStatus(framework.Error, err.Error())
-		}
-		status := schedulerRecord.PreBind.Status
-		switch status {
-		case "":
-			logs.Warn("configmap: %s handler for bind not work finish, retry times: %d", retryTime)
-			continue
-		case consts.StateSuccess:
-			logs.Info("configmap: %s create drs for pod(name: %s, uuid: %s) success, detail: %s", cm.Name,
-				pod.Name, pod.UID, utils.ConvertToString(*schedulerRecord.PreBind))
-			return cm, framework.NewStatus(framework.Success)
-		case consts.StateError:
-			err := fmt.Errorf("configmap: %s create drs for pod(name: %s, uuid: %s) failed: %s", cm.Name,
-				pod.Name, pod.UID, schedulerRecord.PreBind.Message)
-			logs.Error(err)
-			return nil, framework.NewStatus(framework.Error, err.Error())
-		case consts.StateUnschedulable:
-			msg := fmt.Sprintf("configmap: %s create drs for pod(name: %s, uuid: %s) failed: %s", cm.Name,
-				pod.Name, pod.UID, schedulerRecord.Filter.Message)
-			logs.Warn(msg)
-			return nil, framework.NewStatus(framework.Unschedulable, msg)
-		default:
-			err = fmt.Errorf("internal error: configmap: %s create drs for pod(name: %s, uuid: %s) failed: unexpected status: %s",
-				cm.Name, pod.Name, pod.UID, status)
-			logs.Error(err)
-			return nil, framework.NewStatus(framework.Error, err.Error())
-		}
-	}
-	err := fmt.Errorf("wait for configmap: %s create drs for pod(name: %s, uuid: %s) timeout with maxRetryTimes: %d",
-		cm.Name, pod.Name, pod.UID, consts.MaxRetryTimes)
-	logs.Error(err)
-	return nil, framework.NewStatus(framework.Error, err.Error())
-}
-
-func (gsp *GCUShareSchedulerPlugin) patchAssignedResult(cm *v1.ConfigMap, pod *v1.Pod) error {
-	result := cm.Data[consts.SchedulerRecord]
-	schedulerRecord := &structs.SchedulerRecord{}
-	if err := json.Unmarshal([]byte(result), schedulerRecord); err != nil {
-		logs.Error(err, "json unmarshal failed, detail: %s", result)
-		return err
-	}
+func (gsp *GCUShareSchedulerPlugin) allocatedDeviceID(nodeName string, pod *v1.Pod) (string, error) {
+	isDrs := gsp.podResource.IsDrsGCUsharingPod(pod)
+	resourceName := gsp.sharedResourceName
 	podRequest := gsp.podResource.GetRequestFromPodResource(pod)
-	drsDevice, err := json.Marshal(schedulerRecord.Filter.Device)
-	if err != nil {
-		logs.Error(err, "json marshal failed, detail: %v", schedulerRecord.Filter.Device)
-		return err
+	if isDrs {
+		resourceName = gsp.drsResourceName
+		podRequest = gsp.podResource.GetRequestDrsPodResource(pod)
 	}
-	assignedContainers, err := json.Marshal(schedulerRecord.PreBind.Containers)
-	if err != nil {
-		logs.Error(err, "json marshal failed, detail: %v", schedulerRecord.PreBind.Containers)
-		return err
-	}
-	patchAnnotations := map[string]interface{}{
-		"metadata": map[string]map[string]string{"annotations": {
-			consts.DRSAssignedDevice:                              string(drsDevice),
-			consts.PodAssignedContainers:                          string(assignedContainers),
-			gsp.config.ReplaceResource(consts.PodAssignedGCUID):   schedulerRecord.Filter.Device.Minor,
-			gsp.config.ReplaceResource(consts.PodRequestGCUSize):  fmt.Sprintf("%d", podRequest),
-			gsp.config.ReplaceResource(consts.PodHasAssignedGCU):  "false",
-			gsp.config.ReplaceResource(consts.PodAssignedGCUTime): fmt.Sprintf("%d", time.Now().UnixNano()),
-		}}}
-	if err := gsp.patchPodAnnotations(pod, patchAnnotations); err != nil {
-		return err
-	}
-	return nil
-}
-
-func (gsp *GCUShareSchedulerPlugin) allocatedDeviceID(nodeName string, pod *v1.Pod) error {
+	gsp.mu.Lock()
 	nodeAvailableGCUs, ok := gsp.filterCache[pod.UID].allAvailable[resources.NodeName(nodeName)]
+	gsp.mu.Unlock()
 	if !ok || len(nodeAvailableGCUs) == 0 {
-		err := fmt.Errorf("internal error: node: %s has no available %s", nodeName, gsp.sharedResourceName)
+		err := fmt.Errorf("internal error: node: %s has no available %s", nodeName, resourceName)
 		logs.Error(err)
-		return err
+		return "", err
 	}
-	podRequest := gsp.podResource.GetRequestFromPodResource(pod)
-	logs.Info("pod(name: %s, uuid: %s) request %s: %d, available %s: %v", pod.Name, pod.UID, gsp.sharedResourceName,
-		podRequest, gsp.sharedResourceName, nodeAvailableGCUs)
+	logs.Info("pod(name: %s, uuid: %s) request %s: %d, available %s: %v", pod.Name, pod.UID, resourceName,
+		podRequest, resourceName, nodeAvailableGCUs)
 
 	selectedID := ""
 	selectedIDMemory := 0
@@ -540,24 +274,82 @@ func (gsp *GCUShareSchedulerPlugin) allocatedDeviceID(nodeName string, pod *v1.P
 		err := fmt.Errorf("internal error! node: %s could not bind pod(name: %s, uuid: %s) with available %s: %v",
 			nodeName, pod.Name, pod.UID, gsp.sharedResourceName, nodeAvailableGCUs)
 		logs.Error(err)
-		return err
+		return "", err
 	}
 	logs.Info("gcushare scheduler plugin assigned device '%s' to pod(name: %s, uuid: %s)",
 		selectedID, pod.Name, pod.UID)
-	patchAnnotations := map[string]interface{}{
-		"metadata": map[string]map[string]string{"annotations": {
-			gsp.config.ReplaceResource(consts.PodAssignedGCUID):   selectedID,
-			gsp.config.ReplaceResource(consts.PodRequestGCUSize):  fmt.Sprintf("%d", podRequest),
-			gsp.config.ReplaceResource(consts.PodHasAssignedGCU):  "false",
-			gsp.config.ReplaceResource(consts.PodAssignedGCUTime): fmt.Sprintf("%d", time.Now().UnixNano()),
-		}}}
+	return selectedID, nil
+}
+
+func (gsp *GCUShareSchedulerPlugin) patchAssignedResult(pod *v1.Pod, selectedID string, nodeName string) error {
+	podRequest := gsp.podResource.GetRequestFromPodResource(pod)
+	if gsp.podResource.IsDrsGCUsharingPod(pod) {
+		podRequest = gsp.podResource.GetRequestDrsPodResource(pod)
+	}
+	patchAnnotations := map[string]string{
+		gsp.config.ReplaceResource(consts.PodAssignedGCUMinor): selectedID,
+		gsp.config.ReplaceResource(consts.PodRequestGCUSize):   fmt.Sprintf("%d", podRequest),
+		gsp.config.ReplaceResource(consts.PodHasAssignedGCU):   "false",
+		gsp.config.ReplaceResource(consts.PodAssignedGCUTime):  fmt.Sprintf("%d", time.Now().UnixNano()),
+	}
+	if gsp.podResource.IsDrsGCUsharingPod(pod) {
+		deviceSpec := gsp.filterCache[pod.UID].drsCapacity[resources.NodeName(nodeName)]
+		for _, device := range deviceSpec.Devices {
+			if device.Minor == selectedID {
+				patchAnnotations[consts.PodAssignedGCUIndex] = device.Index
+				break
+			}
+		}
+		profileNamePrefixMap := gsp.getProfileNamePrefixMap(deviceSpec.Profiles)
+		assignedContainers := map[string]structs.AllocateRecord{}
+		for _, container := range pod.Spec.Containers {
+			if val, ok := container.Resources.Limits[v1.ResourceName(gsp.drsResourceName)]; ok {
+				profileName := string(profileNamePrefixMap[fmt.Sprintf("%dg", int(val.Value()))])
+				assignedContainers[container.Name] = structs.AllocateRecord{
+					KubeletAllocated: &[]bool{false}[0],
+					Request:          &[]int{int(val.Value())}[0],
+					ProfileName:      &profileName,
+					ProfileID:        &[]string{string(deviceSpec.Profiles[structs.ProfileName(profileName)])}[0],
+				}
+			}
+		}
+		assignedContainersBytes, err := json.Marshal(assignedContainers)
+		if err != nil {
+			logs.Error(err, "json marshal failed, detail: %v", assignedContainers)
+			return err
+		}
+		patchAnnotations[consts.PodAssignedContainers] = string(assignedContainersBytes)
+	}
 	if err := gsp.patchPodAnnotations(pod, patchAnnotations); err != nil {
 		return err
 	}
+	gsp.setReserveCache(pod, patchAnnotations)
 	return nil
 }
 
-func (gsp *GCUShareSchedulerPlugin) patchPodAnnotations(pod *v1.Pod, patchAnnotations map[string]interface{}) error {
+/*
+This function is used in scenarios where the update of the pod informer cache lags behind,
+providing the annotations cache of the previous pod for the next pod entering the filter extension point
+*/
+func (gsp *GCUShareSchedulerPlugin) setReserveCache(pod *v1.Pod, patchAnnotations map[string]string) {
+	gsp.mu.Lock()
+	defer gsp.mu.Unlock()
+	gsp.reserveCache = make(map[k8sTypes.UID]map[string]string)
+	gsp.reserveCache[pod.UID] = patchAnnotations
+	logs.Info("clear reserve cache and set reserve cache for pod(name: %s, uuid: %s), annotations: %v",
+		pod.Name, pod.UID, patchAnnotations)
+}
+
+func (gsp *GCUShareSchedulerPlugin) getReserveCache(podUID k8sTypes.UID) (map[string]string, bool) {
+	gsp.mu.Lock()
+	defer gsp.mu.Unlock()
+	reserveCache, ok := gsp.reserveCache[podUID]
+	return reserveCache, ok
+}
+
+func (gsp *GCUShareSchedulerPlugin) patchPodAnnotations(pod *v1.Pod, annotations map[string]string) error {
+	patchAnnotations := map[string]interface{}{
+		"metadata": map[string]map[string]string{"annotations": annotations}}
 	patchedAnnotationBytes, err := json.Marshal(patchAnnotations)
 	if err != nil {
 		logs.Error(err, "marshal patch annotations failed")
@@ -572,11 +364,11 @@ func (gsp *GCUShareSchedulerPlugin) patchPodAnnotations(pod *v1.Pod, patchAnnota
 			time.Sleep(3 * time.Second)
 			continue
 		}
-		logs.Info("bind patch pod(name: %s, uuid: %s) annotations: %s success", pod.Name, pod.UID,
+		logs.Info("patch pod(name: %s, uuid: %s) annotations: %s success", pod.Name, pod.UID,
 			string(patchedAnnotationBytes))
 		return nil
 	}
-	err = fmt.Errorf("bind patch pod(name: %s, uuid: %s) annotations failed with max retry time: %d, content: %s",
+	err = fmt.Errorf("patch pod(name: %s, uuid: %s) annotations failed with max retry time: %d, content: %s",
 		pod.Name, pod.UID, consts.MaxRetryTimes, string(patchedAnnotationBytes))
 	logs.Error(err)
 	return err

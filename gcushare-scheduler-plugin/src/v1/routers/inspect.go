@@ -146,7 +146,7 @@ func (ins *Inspect) buildNodeInfo(node *v1.Node, drs bool) NodeInfo {
 		if !gcusharePod && !drsPod {
 			continue
 		}
-		minor := ins.podResource.GetPodAssignedDeviceID(&pod)
+		minor := pod.Annotations[consts.PodAssignedGCUMinor]
 		if minor == "" {
 			logs.Warn("found pod(name: %s, uuid: %s), but has not been assigned device", pod.Name, pod.UID)
 			continue
@@ -225,9 +225,29 @@ func (ins *Inspect) buildNodeInfo(node *v1.Node, drs bool) NodeInfo {
 }
 
 func (ins *Inspect) initDevices(drs bool, node *v1.Node) (map[string]*Device, int, error) {
-	deviceMap, err := ins.nodeResource.GetGCUDeviceMemoryMap(drs, node)
-	if err != nil {
-		return nil, -1, err
+	var deviceMap map[string]int
+	var err error
+	if drs {
+		nodeDevice, ok := node.Annotations[consts.GCUDRSCapacity]
+		if !ok {
+			err := fmt.Errorf("node: %s missing drs gcu capacity annotations: %v", node.Name, node.Annotations)
+			logs.Error(err)
+			return nil, -1, err
+		}
+		deviceCapacity := &structs.DRSGCUCapacity{}
+		if err := json.Unmarshal([]byte(nodeDevice), deviceCapacity); err != nil {
+			logs.Error(err, "json unmarshal failed, content: %s", nodeDevice)
+			return nil, -1, err
+		}
+		deviceMap = map[string]int{}
+		for _, device := range deviceCapacity.Devices {
+			deviceMap[device.Minor] = device.Capacity
+		}
+	} else {
+		deviceMap, err = ins.nodeResource.GetGCUDeviceMemoryMap(node)
+		if err != nil {
+			return nil, -1, err
+		}
 	}
 	devices := map[string]*Device{}
 	nodeTotalGCU := 0

@@ -21,6 +21,7 @@ type Device struct {
 type DeviceInfo struct {
 	BusID string
 	Path  string
+	Index string
 }
 
 func NewDevice(config *config.Config) (*Device, error) {
@@ -71,9 +72,10 @@ func (rer *Device) buildDeviceInfo() error {
 		rer.Info[gcuDevice.Minor] = DeviceInfo{
 			Path:  devPath,
 			BusID: gcuDevice.PCIBusID,
+			Index: gcuDevice.Index,
 		}
-		logs.Info("found device %s%s(minor: %s, path: %s, product: %s, busid: %s)", devType, gcuDevice.Minor,
-			gcuDevice.Minor, devPath, gcuDevice.Product, gcuDevice.PCIBusID)
+		logs.Info("found device %s%s(index: %s, path: %s, product: %s, busid: %s)", devType, gcuDevice.Minor,
+			gcuDevice.Index, devPath, gcuDevice.Product, gcuDevice.PCIBusID)
 	}
 	rer.Count = len(rer.Info)
 	return nil

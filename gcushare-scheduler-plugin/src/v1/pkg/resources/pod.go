@@ -4,17 +4,15 @@ package resources
 import (
 	"context"
 	"fmt"
-	"strconv"
 	"time"
 
 	v1 "k8s.io/api/core/v1"
-	k8serr "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8sTypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/kubernetes/pkg/scheduler/framework"
 
 	"gcushare-scheduler-plugin/pkg/consts"
 	"gcushare-scheduler-plugin/pkg/logs"
-	"gcushare-scheduler-plugin/pkg/structs"
 )
 
 type PodResource BaseResource
@@ -53,87 +51,118 @@ func (res *PodResource) GetRequestDrsPodResource(pod *v1.Pod) int {
 	return total
 }
 
-func (res *PodResource) GetUsedGCUs(podInfoList []*framework.PodInfo) (map[string]int, error) {
-	nodeUsedMemory := map[string]int{}
+func (res *PodResource) GetUsedSharedGCU(podInfoList []*framework.PodInfo,
+	getReserveCache func(podUID k8sTypes.UID) (map[string]string, bool)) (map[string]int, map[string]struct{}, error) {
+	usedSharedGCU := map[string]int{}
+	deviceUsedByDRS := map[string]struct{}{}
 	for _, podInfo := range podInfoList {
-		if !res.IsGCUsharingPod(podInfo.Pod) {
+		isDrsPod := res.IsDrsGCUsharingPod(podInfo.Pod)
+		isGCUSharingPod := res.IsGCUsharingPod(podInfo.Pod)
+		if !isDrsPod && !isGCUSharingPod {
 			continue
 		}
-		podDeleted, assignedID := res.GetPodAssignedDeviceIDWithRetry(podInfo)
-		if podDeleted {
+		assignedMinor, skip, err := res.GetAssignedMinorWithRetry(podInfo.Pod, getReserveCache)
+		if err != nil {
+			return nil, nil, err
+		}
+		if skip {
 			continue
 		}
-		if assignedID == "" {
-			err := fmt.Errorf("assignedID not found in pod(name: %s, uuid: %s) annotations with maxRetryTimes: %d",
-				podInfo.Pod.Name, podInfo.Pod.UID, consts.MaxRetryTimes)
-			logs.Error(err)
-			return nil, err
-		}
-
-		podRequestGCU, ok := podInfo.Pod.Annotations[res.Config.ReplaceResource(consts.PodRequestGCUSize)]
-		if !ok {
-			err := fmt.Errorf("internal error: podRequestGCU not found in pod(name: %s, uuid: %s) annotations: %v",
-				podInfo.Pod.Name, podInfo.Pod.UID, podInfo.Pod.Annotations)
-			logs.Error(err)
-			return nil, err
-		}
-		value, err := strconv.Atoi(podRequestGCU)
-		if err != nil {
-			logs.Error(err)
-			return nil, err
-		}
-		logs.Info("gcu:%s is using by pod(name: %s, uuid: %s, used: %d)", assignedID, podInfo.Pod.Name,
-			podInfo.Pod.UID, value)
-		nodeUsedMemory[assignedID] += value
-	}
-	return nodeUsedMemory, nil
-}
-
-func (res *PodResource) GetPodAssignedDeviceIDWithRetry(podInfo *framework.PodInfo) (bool, string) {
-	for retryTime := 0; retryTime < consts.MaxRetryTimes; retryTime++ {
-		if assignedID := res.GetPodAssignedDeviceID(podInfo.Pod); assignedID != "" {
-			return false, assignedID
-		}
-		time.Sleep(3 * time.Second)
-		pod, err := res.Clientset.CoreV1().Pods(podInfo.Pod.Namespace).Get(context.TODO(),
-			podInfo.Pod.Name, metav1.GetOptions{})
-		if err != nil {
-			if k8serr.IsNotFound(err) {
-				logs.Warn("pod(name: %s, uuid: %s) has been deleted, skip it", podInfo.Pod.Name, podInfo.Pod.UID)
-				return true, ""
+		if isDrsPod {
+			logs.Warn("device: %s is using by drs pod(name: %s, uuid: %s)", assignedMinor, podInfo.Pod.Name, podInfo.Pod.UID)
+			if _, ok := deviceUsedByDRS[assignedMinor]; !ok {
+				deviceUsedByDRS[assignedMinor] = struct{}{}
 			}
-			logs.Error(err, "get pod(name: %s, uuid: %s) from cluster failed, retry time: %d",
-				podInfo.Pod.Name, podInfo.Pod.UID, retryTime)
+		} else {
+			request := res.GetRequestFromPodResource(podInfo.Pod)
+			logs.Info("device: %s is using by gcushare pod(name: %s, uuid: %s, used: %d)", assignedMinor, podInfo.Pod.Name,
+				podInfo.Pod.UID, request)
+			usedSharedGCU[assignedMinor] += request
+		}
+	}
+	return usedSharedGCU, deviceUsedByDRS, nil
+}
+
+func (res *PodResource) GetUsedDRSGCU(podInfoList []*framework.PodInfo,
+	getReserveCache func(podUID k8sTypes.UID) (map[string]string, bool)) (
+	map[string]int, map[string]struct{}, error) {
+	usedDRSGCU := map[string]int{}
+	deviceUsedBySharedGCU := map[string]struct{}{}
+	for _, podInfo := range podInfoList {
+		isDrsPod := res.IsDrsGCUsharingPod(podInfo.Pod)
+		isGCUSharingPod := res.IsGCUsharingPod(podInfo.Pod)
+		if !isDrsPod && !isGCUSharingPod {
 			continue
 		}
-		if podInfo.Pod.UID != pod.UID {
-			logs.Warn("pod(name: %s, uuid: %s) has been recreat, skip it", podInfo.Pod.Name, podInfo.Pod.UID)
-			return true, ""
+		assignedMinor, skip, err := res.GetAssignedMinorWithRetry(podInfo.Pod, getReserveCache)
+		if err != nil {
+			return nil, nil, err
 		}
-		logs.Warn("framework.PodInfo update pod(name: %s, uuid: %s)", podInfo.Pod.Name, podInfo.Pod.UID)
-		podInfo.Pod = pod
-	}
-	return false, ""
-}
-
-func (res *PodResource) GetPodAssignedDeviceID(pod *v1.Pod) string {
-	value, ok := pod.ObjectMeta.Annotations[res.Config.ReplaceResource(consts.PodAssignedGCUID)]
-	if !ok {
-		logs.Warn("pod(name: %s, uuid: %s) has not been assigned device", pod.Name, pod.UID)
-		return ""
-	}
-	return value
-}
-
-func (res *PodResource) InitPodAssignedContainers(pod *v1.Pod) map[string]structs.AllocateRecord {
-	result := make(map[string]structs.AllocateRecord, len(pod.Spec.Containers))
-	for _, container := range pod.Spec.Containers {
-		if val, ok := container.Resources.Limits[v1.ResourceName(res.DRSResourceName)]; ok && val.Value() > 0 {
-			alloc := structs.AllocateRecord{}
-			value := int(val.Value())
-			alloc.Request = &value
-			result[container.Name] = alloc
+		if skip {
+			continue
+		}
+		if isDrsPod {
+			request := res.GetRequestDrsPodResource(podInfo.Pod)
+			logs.Info("device: %s is using by drs pod(name: %s, uuid: %s, used: %d)", assignedMinor, podInfo.Pod.Name,
+				podInfo.Pod.UID, request)
+			usedDRSGCU[assignedMinor] += request
+		} else {
+			logs.Warn("device: %s is using by gcushare pod(name: %s, uuid: %s)", assignedMinor, podInfo.Pod.Name, podInfo.Pod.UID)
+			if _, ok := deviceUsedBySharedGCU[assignedMinor]; !ok {
+				deviceUsedBySharedGCU[assignedMinor] = struct{}{}
+			}
 		}
 	}
-	return result
+	return usedDRSGCU, deviceUsedBySharedGCU, nil
+}
+
+func (res *PodResource) GetAssignedMinorWithRetry(pod *v1.Pod, getReserveCache func(podUID k8sTypes.UID) (map[string]string, bool)) (
+	string, bool, error) {
+	assignedMinor, ok := pod.Annotations[res.Config.ReplaceResource(consts.PodAssignedGCUMinor)]
+	if ok {
+		return assignedMinor, false, nil
+	}
+	logs.Warn("assignedMinor not found in pod(name: %s, uuid: %s) annotations: %v. "+
+		"This might be caused by the untimely update of the pod informer cache. "+
+		"An attempt will be made to obtain the pod annotation from the reserve cache",
+		pod.Name, pod.UID, pod.Annotations)
+	reserveCache, ok := getReserveCache(pod.UID)
+	if ok {
+		assignedMinor, ok = reserveCache[res.Config.ReplaceResource(consts.PodAssignedGCUMinor)]
+		if !ok {
+			err := fmt.Errorf("internal error! reserve cache found but assignedMinor not found for "+
+				"pod(name: %s, uuid: %s), reserve cache: %v	", pod.Name, pod.UID, reserveCache)
+			logs.Error(err)
+			return "", false, err
+		}
+		logs.Info("assignedMinor found in reserve cache for pod(name: %s, uuid: %s), assignedMinor: %s",
+			pod.Name, pod.UID, assignedMinor)
+		return assignedMinor, false, nil
+	}
+
+	logs.Warn("reserve cache not found for pod(name: %s, uuid: %s), try get it from api-server", pod.Name, pod.UID)
+	for i := 0; i < 10; i++ {
+		newPod, err := res.Clientset.CoreV1().Pods(pod.Namespace).Get(context.TODO(), pod.Name, metav1.GetOptions{})
+		if err != nil {
+			logs.Error(err, "get pod(name: %s, uuid: %s) from cluster failed, retry after 0.1s", pod.Name, pod.UID)
+			continue
+		}
+		if newPod.UID != pod.UID {
+			logs.Warn("pod(name: %s, uuid: %s) has been deleted, skip it", pod.Name, pod.UID)
+			return "", true, nil
+		}
+		assignedMinor, ok = newPod.Annotations[res.Config.ReplaceResource(consts.PodAssignedGCUMinor)]
+		if ok {
+			logs.Info("assignedMinor found in pod(name: %s, uuid: %s), assignedMinor: %s",
+				pod.Name, pod.UID, assignedMinor)
+			return assignedMinor, false, nil
+		}
+		logs.Warn("assignedMinor not found in pod(name: %s, uuid: %s) annotations: %v, retry after 0.1s",
+			pod.Name, pod.UID, newPod.Annotations)
+		time.Sleep(100 * time.Millisecond)
+	}
+	err := fmt.Errorf("assignedMinor not found in pod(name: %s, uuid: %s) annotations: %v in 10 retries",
+		pod.Name, pod.UID, pod.Annotations)
+	logs.Error(err)
+	return "", false, err
 }
