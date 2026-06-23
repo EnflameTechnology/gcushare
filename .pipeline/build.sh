@@ -92,6 +92,8 @@ function main() {
         clean_all;;
     "all")
         build_all;;
+    "ci_build")
+        ci_build;;
     *)
         usage
         exit 1;;
