@@ -49,10 +49,6 @@ jobs:
             "${{ env.SA_IMAGE }}" \
             bash -c 'cd /app && python3 /sast/run.py --all_ci_check'
 
-      - name: Install Driver
-        run: |
-          sudo ./gcushare/test/install_driver.sh
-
       - name: Run CI Build
         run: |
           sudo docker run --rm \
