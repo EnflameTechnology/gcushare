@@ -1,3 +1,4 @@
+
 #!/bin/bash
 #
 # Copyright 2024 Enflame. All Rights Reserved.
@@ -18,31 +19,6 @@ Example:
     ./build.sh all
     ./build.sh clean
 EOF
-}
-
-function ci_build() {
-    # clean old dist if exist
-    if [ -d "./dist" ]; then
-        clean_all
-    fi
-    echo -e "\033[33mBuilding gcushare package start...\033[0m"
-
-    PKG_DIR="dist/gcushare_$PKG_VER"
-    mkdir -p $PKG_DIR
-
-    cd gcushare-device-plugin
-    ./build.sh all
-    cp -rf dist/* ../$PKG_DIR/
-    rm -rf dist
-    cd -
-
-    cd gcushare-scheduler-plugin
-    ./build.sh all
-    cp -rf dist/* ../$PKG_DIR/
-    rm -rf dist
-    cd -
-
-    echo -e "\033[33mBuilding gcushare package successfully!\033[0m"
 }
 
 function build_all() {
@@ -92,8 +68,6 @@ function main() {
         clean_all;;
     "all")
         build_all;;
-    "ci_build")
-        ci_build;;
     *)
         usage
         exit 1;;
