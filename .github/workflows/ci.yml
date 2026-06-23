@@ -62,7 +62,7 @@ jobs:
             -v /home/pypi_packages:/home/pypi_packages \
             -w /app \
             "${{ env.CI_IMAGE }}" \
-            bash -c 'sudo git config --global --add safe.directory /app/gcushare;sudo ./gcushare/.pipeline/build.sh build_all'
+            bash -c 'sudo git config --global --add safe.directory /app/gcushare;sudo bash ./gcushare/.pipeline/build.sh build_all'
 
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v4
