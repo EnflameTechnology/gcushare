@@ -10,7 +10,7 @@ on:
 
 env:
   SA_IMAGE: registry-egc.enflame-tech.com/enflame/ci_sast:v1.0-os
-  CI_IMAGE: registry-egc.enflame-tech.com/artifacts/torch_gcu:v2.10.0-TR3.7.107-ubuntu2204
+  CI_IMAGE: registry-egc.enflame-tech.com/artifacts/qic_ubuntu_1804_gcc7:1.8.2
   SAST_REPO: EnflameTechnology/sast
   SAST_BRANCH: main
 
