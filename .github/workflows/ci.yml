@@ -68,10 +68,20 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: gcushare-wheel
-          path: /app/gcushare/dist/*.whl
+          path: ${{ github.workspace }}/gcushare/dist/**/*.whl
           if-no-files-found: error
 
       - name: Clean up
         if: always()
         run: |
-          sudo rm -rf /app/gcushare /app/sast
+          set -euo pipefail
+          WORKSPACE="${{ github.workspace }}"
+          for repo in gcushare sast; do
+            TARGET_PATH="${WORKSPACE}/${repo}"
+            if [ -d "${TARGET_PATH}" ]; then
+              sudo rm -rf "${TARGET_PATH}"
+              echo "Removed ${TARGET_PATH}"
+            else
+              echo "Skip ${TARGET_PATH}, directory not found"
+            fi
+          done
