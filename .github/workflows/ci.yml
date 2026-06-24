@@ -62,13 +62,13 @@ jobs:
             -v /home/pypi_packages:/home/pypi_packages \
             -w /app \
             "${{ env.CI_IMAGE }}" \
-            bash -c 'sudo git config --global --add safe.directory /app/gcushare;cd /app/gcushare && bash ./build.sh all && sleep 300'
+            bash -c 'sudo git config --global --add safe.directory /app/gcushare;cd /app/gcushare && bash ./build.sh all'
 
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v4
         with:
           name: gcushare-wheel
-          path: ${{ github.workspace }}/gcushare/dist/**/*.whl
+          path: ${{ github.workspace }}/gcushare/dist/**
           if-no-files-found: error
 
       - name: Clean up
