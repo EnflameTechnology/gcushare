@@ -1,0 +1,87 @@
+name: CI Pipeline
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+env:
+  SA_IMAGE: registry-egc.enflame-tech.com/enflame/ci_sast:v1.0-os
+  CI_IMAGE: registry-egc.enflame-tech.com/artifacts/qic_ubuntu_1804_gcc7:1.8.2
+  SAST_REPO: EnflameTechnology/sast
+  SAST_BRANCH: main
+
+jobs:
+  all-ci-check:
+    runs-on: S60
+
+    steps:
+      - name: Setup SSH Agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Checkout SAST tools
+        uses: actions/checkout@v4
+        with:
+          repository: ${{env.SAST_REPO}}
+          ref: ${{env.SAST_BRANCH}}
+          path: ./sast
+          ssh-key: ${{ secrets.SSH_PUB_KEY }}
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Required for full git history to compare changes
+          path: ./gcushare
+          ssh-key: ${{ secrets.SSH_PUB_KEY }}
+
+      - name: Run static code analysis
+        run: |
+          sudo docker run --rm \
+            -v "$(pwd)/gcushare:/app" \
+            -v "$(pwd)/sast:/sast" \
+            -u "$(id -u):$(id -g)" \
+            -w /app \
+            "${{ env.SA_IMAGE }}" \
+            bash -c 'cd /app && python3 /sast/run.py --all_ci_check'
+
+      - name: Run CI Build
+        run: |
+          sudo docker run --rm \
+            -v "$(pwd):/app" \
+            --volume=/log:/log \
+            --volume=/root:/root \
+            --volume=/lib/modules/:/lib/modules/ \
+            --volume=/usr/src/:/usr/src/ \
+            --volume=/dev:/dev \
+            --privileged \
+            -v /home/pypi_packages:/home/pypi_packages \
+            -w /app \
+            "${{ env.CI_IMAGE }}" \
+            bash -c 'sudo git config --global --add safe.directory /app/gcushare;cd /app/gcushare && bash ./build.sh all'
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gcushare-wheel
+          path: ${{ github.workspace }}/gcushare/dist/**
+          if-no-files-found: error
+
+      - name: Clean up
+        if: always()
+        run: |
+          set -euo pipefail
+          WORKSPACE="${{ github.workspace }}"
+          for repo in gcushare sast; do
+            TARGET_PATH="${WORKSPACE}/${repo}"
+            if [ -d "${TARGET_PATH}" ]; then
+              sudo rm -rf "${TARGET_PATH}"
+              echo "Removed ${TARGET_PATH}"
+            else
+              echo "Skip ${TARGET_PATH}, directory not found"
+            fi
+          done
