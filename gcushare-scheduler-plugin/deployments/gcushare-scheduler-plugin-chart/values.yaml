@@ -1,0 +1,41 @@
+# Copyright (c) 2025, ENFLAME INC.  All rights reserved.
+
+replicaCount: 1
+
+deployName: "gcushare-scheduler-plugin"
+
+image:
+  repository: artifact.enflame.cn/enflame_docker_images/enflame
+  name: gcushare-scheduler-plugin
+  pullPolicy: IfNotPresent
+  # Overrides the image tag whose default is the chart appVersion.
+  tag: "latest"
+
+container:
+  name: gcushare-scheduler-plugin
+  port: 12345
+  logLevel: 3
+
+configmap:
+  name: gcushare-scheduler-plugin
+  lease: gcushare-scheduler-plugin
+  schedulerName: gcushare-scheduler
+
+service:
+  name: gcushare-scheduler-plugin
+  type: NodePort
+  targetPort: 12345
+  nodePort: 32766
+  servicePort: 32766
+
+rbac:
+  clusterRole:
+    name: gcushare-scheduler-plugin
+  serviceAccount:
+    name: gcushare-scheduler-plugin
+  clusterRoleBinding:
+    name: gcushare-scheduler-plugin
+
+tolerations: []
+
+affinity: {}

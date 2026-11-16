@@ -1,0 +1,19 @@
+{
+	"version": "v1",
+	"vendor": [
+		"enflame",
+		"zixiao"
+	],
+	"idPrefix": [
+		"gcu"
+	],
+	"idFile": [
+		"dev"
+	],
+	"uuidPath": [
+		"ssm"
+	],
+	"uuidFile": [
+		"chipid"
+	]
+}

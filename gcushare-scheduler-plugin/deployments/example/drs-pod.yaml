@@ -1,0 +1,20 @@
+# Copyright (c) 2025, ENFLAME INC.  All rights reserved.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: drs-pod-1
+  namespace: kube-system
+spec:
+  schedulerName: gcushare-scheduler
+  terminationGracePeriodSeconds: 0
+  containers:
+    - name: pod-gcu-example
+      image: ubuntu:18.04
+      imagePullPolicy: IfNotPresent
+      command:
+        - sleep
+      args:
+        - '100000'
+      resources:
+        limits:
+          enflame.com/drs-gcu: 1
